@@ -70,13 +70,17 @@ export async function compactContext(session: Session, w: (o: unknown) => void, 
   let streamErr: string | null = null
   try {
     // 输入 = 当前有效上下文（排除本气泡，沿用已有分割点）+ 摘要指令
-    // 前置 developer 记忆消息必须与主请求逐字一致：否则前缀在开头就分叉 → 上游 prompt cache miss（从零 prefill）
+    // developer 记忆消息插在 system 之后（与主请求 SYSTEM→DEVELOPER 顺序一致），前缀对齐避免 cache miss
     const memories = readMemories()
     const messages = [
-      ...(memories.length ? [{ role: 'developer', content: memories.join('\n') }] : []),
       ...toApiMessages(session.history.filter((e) => e.id !== entry.id)),
       { role: 'user', content: SUMMARY_PROMPT },
     ]
+    if (memories.length) {
+      const devMsg = { role: 'developer', content: memories.join('\n') }
+      const sysIdx = messages.findIndex((m) => m.role === 'system')
+      messages.splice(sysIdx >= 0 ? sysIdx + 1 : 0, 0, devMsg)
+    }
     const stream = await getOpenAI(s.baseUrl, s.apiKey).chat.completions.create(
       {
         model: s.model,

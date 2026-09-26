@@ -86,7 +86,12 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
       const allTools = currentTools()
       let messages = toApiMessages(session.history.slice(0, pos))
       const memories = readMemories()
-      if (memories.length) messages = [{ role: 'developer', content: memories.join('\n') }, ...messages]
+      if (memories.length) {
+        // developer 记忆消息插在 system 之后（SYSTEM→DEVELOPER 顺序），保持与历史前缀一致
+        const devMsg = { role: 'developer', content: memories.join('\n') }
+        const sysIdx = messages.findIndex((m) => m.role === 'system')
+        messages.splice(sysIdx >= 0 ? sysIdx + 1 : 0, 0, devMsg)
+      }
       const baseBefore = usage.prompt
       const completionBefore = usage.completion
       const stream = await getOpenAI(s.baseUrl, s.apiKey).chat.completions.create(

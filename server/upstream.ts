@@ -105,7 +105,7 @@ export function toApiMessages(history: Entry[]) {
   msgs.push({ role: 'user', content: 'What did we do so far?' })
   msgs.push({ role: 'assistant', content: history[sumIdx].content ?? '' })
   for (const m of history.slice(sumIdx + 1)) msgs.push(...mapEntry(m))
-  msgs.push({ role: 'system', content: '从这里继续调用工具或者给出答案' })
+  msgs.push({ role: 'user', content: '从这里继续调用工具或者给出答案' })
   return sanitizeToolCalls(msgs)
 }
 
