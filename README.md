@@ -1,0 +1,83 @@
+# tiny-agent
+
+本地单服务器聊天助手：React 前端 + Express 服务器，对接任意 OpenAI 兼容上游（如 tabbyAPI / llama.cpp server），支持 MCP 插件扩展工具、本地 TTS 朗读。
+
+## 架构
+
+- **服务器是会话状态的唯一事实源**：浏览器只发指令、收 SSE 事件，刷新/重连不丢状态
+- 上游调用 100% 官方 OpenAI SDK（`openai` npm 包），运行在服务器端
+- 前端：React 19 + Vite 8 + Tailwind v4 + shadcn（base-ui）
+- 服务器：Express 5 + TypeScript（Node 24 原生运行，无需编译）
+
+```
+浏览器 ──/api（SSE 流式）──> Express server ──OpenAI SDK──> OpenAI 兼容上游
+                                    │
+                    ┌───────────────┼───────────────┐
+                内置工具          MCP 插件          TTS
+              (pwsh/read_image)  (stdio 子进程)   (pwsh 7)
+```
+
+```
+client/          前端全部（index.html 入口、组件、hooks、vite/tsconfig/shadcn 配置、dist/ 构建产物）
+server/          服务器全部（index.ts 单文件 + tts.ps1）
+```
+
+运行时数据与源码分离，位于数据目录（见下），安装目录可只读。
+
+## 快速开始
+
+```bash
+npm install
+npm run dev          # server(3000) + vite(5173)，vite 代理 /api → 3000
+```
+
+打开 http://localhost:5173 ，在设置里填上游地址（如 `http://127.0.0.1:7528/v1`）和模型名。
+
+### 数据目录
+
+服务器启动参数 `--data-dir <路径>` 显式指定数据目录，缺省 `./data`（相对进程 cwd）：
+
+```bash
+npm run dev:server -- --data-dir D:/tiny-agent
+```
+
+数据目录内容：
+
+| 文件/目录 | 说明 |
+|---|---|
+| `settings.json` | 上游地址、模型、MCP 配置、工具开关（UI 设置页写入） |
+| `sessions/` | 会话，每会话一个 JSON 文件 + `_index.json`（当前会话） |
+| `memories.json` | 持久记忆，每次生成注入 developer 角色 |
+| `workspace/` | pwsh 工具工作目录 + read_image 相对路径基准；内置工具 `%TEMP%` 重定向到其 `tmp/`（启动时清扫 7 天前文件） |
+| `mcp/<插件名>/` | MCP 插件工作目录（截图/日志/临时文件收拢于此，启动时清扫 7 天前文件） |
+| `tts.wav` | TTS 缓存（同文本复用） |
+| `crash.log` | 未捕获异常/未处理 rejection 日志 |
+
+## 工具
+
+- **pwsh**：在本地执行 PowerShell（设置页可开关）；工作目录 `data/workspace`；30s 超时、输出截断 8000 字符
+- **read_image**：读取本机图片（≤20MB）注入上下文；相对路径基于 `data/workspace`
+- **MCP 插件**：设置页配置 `command + args + env`，官方 `@modelcontextprotocol/sdk` stdio 传输；工作目录 `data/mcp/<插件名>`（TEMP 重定向到其 `tmp/`）；工具名加 `mcp__<插件>__` 前缀；20s 连接超时（首次 npx 拉包较慢）、30s 工具超时；服务器退出时按进程树清理（Windows `taskkill /T`）
+
+## TTS
+
+设置页开启后，朗读按钮调用 `POST /api/tts`：pwsh 7 + System.Speech（本地 Xiaoxiao 音色）合成 wav 流式返回。需要安装 PowerShell 7。
+
+## 脚本
+
+| 脚本 | 说明 |
+|---|---|
+| `npm run dev` | server + vite 并行（开发） |
+| `npm run dev:server` | 仅 server（`-- --data-dir <路径>` 可传数据目录） |
+| `npm run dev:vite` | 仅 vite |
+| `npm run build` | 类型检查 + vite 构建 → `client/dist/` |
+| `npm start` | 生产模式：server 托管 `client/dist/` + API，单端口 3000 |
+
+## 独立发布
+
+```bash
+npm run build
+npm start            # 或 npm start -- --data-dir <路径>
+```
+
+浏览器直接访问 http://localhost:3000 ，数据落在 `--data-dir` 指定位置（缺省 `./data`）。
