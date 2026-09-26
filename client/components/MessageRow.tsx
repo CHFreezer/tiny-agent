@@ -71,8 +71,10 @@ export function MessageRow({
         ? 'border border-dashed border-border bg-muted/40 text-muted-foreground text-[13px] max-w-[85%]'
         : entry.role === 'tool'
           ? 'border border-border bg-card text-foreground max-w-[85%] text-[13px]'
-          : entry.role === 'summary'
-            ? 'border-0 bg-transparent shadow-none px-0 py-1 max-w-full'
+        : entry.role === 'summary'
+          ? entry.summaryStatus === 'failed'
+            ? 'border border-red-300 bg-red-50 text-red-700 shadow-none px-3 py-2 max-w-full'
+            : 'border-0 bg-transparent shadow-none px-0 py-1 max-w-full'
     : 'border border-border bg-card text-foreground max-w-[85%]'
   // 完全空的条目（无正文/思考/工具调用）不渲染气泡壳
   const isEmpty = !entry.content && !entry.reasoning && !entry.tool_calls?.length
