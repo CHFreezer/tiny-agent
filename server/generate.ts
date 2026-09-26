@@ -79,6 +79,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
         stallCtl.abort()
       }, 120_000)
     }
+    const t0 = Date.now() // 本轮请求起点：空流时区分 prefill 超时与模型真空输出
     try {
       const allTools = currentTools()
       let messages = toApiMessages(session.history.slice(0, pos))
@@ -166,7 +167,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
       session.history.splice(session.history.indexOf(entry), 1)
       // 空条目移除后重发权威历史：客户端镜像同步，避免幽灵空气泡
       w({ h: session.history })
-      if (!failed) failed = '模型返回了空内容，请重试'
+      if (!failed) failed = Date.now() - t0 > 30000 ? '上游响应超时（prefill 过长），请重试' : '模型返回了空内容，请重试'
     }
     saveSession(session)
     if (failed) break
