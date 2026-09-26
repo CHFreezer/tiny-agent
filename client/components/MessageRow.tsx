@@ -78,7 +78,8 @@ export function MessageRow({
   const isEmpty = !entry.content && !entry.reasoning && !entry.tool_calls?.length
 
   return (
-    <div className={cn('group flex flex-col gap-1', entry.role === 'user' ? 'items-end' : 'items-stretch')}>
+    <div className={cn('group flex flex-col gap-1', entry.role === 'user' ? 'items-end' : entry.role === 'summary' ? 'items-center' : 'items-stretch')}>
+      {entry.role === 'summary' && <div className="h-px w-full bg-border" />}
       {(!isEmpty || generating) && (
       <div
         className={cn(
@@ -124,7 +125,7 @@ export function MessageRow({
         )}
         {generating && (
           // 生成索引指示：常驻气泡内，相对气泡居中
-          <div className="flex justify-center pt-1">
+          <div className="flex justify-center gap-1 pt-2">
             <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/60" />
             <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/60 [animation-delay:0.15s]" />
             <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/60 [animation-delay:0.3s]" />

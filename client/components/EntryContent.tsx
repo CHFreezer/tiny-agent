@@ -135,9 +135,7 @@ export function EntryContent({
     // 压缩气泡：横向分割线 + 可展开摘要；失败时标注（非有效分割点）
     return (
       <>
-        <div className="border-t-2 border-border" />
         <CollapsibleText
-          className="mt-1.5"
           label={entry.summaryStatus === 'failed' ? '上下文压缩摘要（失败）' : '上下文压缩摘要'}
           text={entry.content ?? ''}
           preview={false}
