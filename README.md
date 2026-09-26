@@ -6,9 +6,13 @@
 
 ## 截图
 
-| 桌面版 | 移动版（iPhone 16） |
-|---|---|
-| ![桌面版](docs/desktop.png) | ![移动版](docs/mobile.png) |
+### 桌面版
+
+![桌面版](docs/desktop.png)
+
+### 移动版（iPhone 16）
+
+<p align="center"><img src="docs/mobile.png" width="320" /></p>
 
 ## 架构
 
