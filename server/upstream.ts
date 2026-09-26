@@ -117,7 +117,15 @@ export function toApiMessages(history: Entry[]) {
 export function buildChatRequest(opts: {
   history: Entry[]
   extra?: Record<string, unknown>[]
-}) {
+}): {
+  model: string
+  messages: OpenAI.Chat.ChatCompletionMessageParam[]
+  stream: true
+  stream_options: { include_usage: true }
+  tools?: OpenAI.Chat.ChatCompletionTool[]
+  max_tokens?: number
+  reasoning_effort?: OpenAI.ReasoningEffort
+} {
   const s = readSettings()
   const allTools = currentTools()
   let messages = toApiMessages(opts.history)

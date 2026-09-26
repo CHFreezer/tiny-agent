@@ -25,7 +25,7 @@ export function markdownToPlain(text: string): string {
 
 // 可折叠文本块：默认折叠（preview=true 时露一行尾巴并跟随最后一行；false 时完全折叠只剩标题行）；
 // text 为原始文本：折叠预览原样展示（不走任何 markdown 格式化）；点击展开全文（流式输出时贴底跟随，用户上滚则暂停跟随）
-function CollapsibleText({ label, text, className, preview = true, error = false, previewText, tail = true, plain = false, selectMode = false }: { label: string; text: string; className?: string; preview?: boolean; error?: boolean; previewText?: string; tail?: boolean; plain?: boolean; selectMode?: boolean }) {
+function CollapsibleText({ label, text, className, preview = true, error = false, previewText, tail = true, plain = false, selectMode = false, subline }: { label: string; text: string; className?: string; preview?: boolean; error?: boolean; previewText?: string; tail?: boolean; plain?: boolean; selectMode?: boolean; subline?: string }) {
   const [open, setOpen] = useState(false)
   const bodyRef = useRef<HTMLDivElement>(null)
   const stuckBottom = useRef(true)
@@ -63,6 +63,7 @@ function CollapsibleText({ label, text, className, preview = true, error = false
         <ChevronRight className={cn('size-3.5 shrink-0 transition-transform', open && 'rotate-90')} />
         {label}
       </button>
+      {subline && <div className="mt-1 text-xs text-destructive">{subline}</div>}
       {open || preview ? (
         <div
           ref={bodyRef}
@@ -134,17 +135,13 @@ export function EntryContent({
   if (entry.role === 'summary') {
     // 压缩气泡：横向分割线 + 可展开摘要；失败时标注（非有效分割点）
     return (
-      <>
-        <CollapsibleText
-          label={entry.summaryStatus === 'failed' ? '上下文压缩摘要（失败）' : '上下文压缩摘要'}
-          text={entry.content ?? ''}
-          preview={false}
-          selectMode={selectMode}
-        />
-        {entry.summaryStatus === 'failed' && (
-          <div className="mt-1 text-xs text-destructive">压缩失败：摘要不完整，此分割点无效，上方对话仍计入上下文</div>
-        )}
-      </>
+      <CollapsibleText
+        label={entry.summaryStatus === 'failed' ? '上下文压缩摘要（失败）' : '上下文压缩摘要'}
+        text={entry.content ?? ''}
+        preview={false}
+        selectMode={selectMode}
+        subline={entry.summaryStatus === 'failed' ? '压缩失败：摘要不完整，此分割点无效，上方对话仍计入上下文' : undefined}
+      />
     )
   }
   if (entry.role === 'assistant') {
