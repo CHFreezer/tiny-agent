@@ -17,9 +17,10 @@ import {
 } from './sessions.ts'
 import { contextTokens, getOpenAI } from './upstream.ts'
 import { mcpStatus, syncMcp } from './mcp.ts'
+import { compactContext } from './compact.ts'
 import { attachClient, endAll, generate, gens, guardSession, makeW, ndjsonHeaders } from './generate.ts'
 import type { Gen } from './generate.ts'
-import type { Entry, McpServerConfig, Settings, ToolCall } from './types.ts'
+import type { Entry, McpServerConfig, Settings, ToolCall, Usage } from './types.ts'
 
 export function registerRoutes(app: express.Express): void {
   // ===== 设置 =====
@@ -199,6 +200,35 @@ export function registerRoutes(app: express.Express): void {
     const g = gens.get(s.id)
     if (g) g.controller.abort()
     res.json({ ok: true })
+  })
+
+  // 手动压缩上下文：与自动压缩同一机制（summary 条目 + 流式事件，气泡实时出现在聊天里）
+  app.post('/api/sessions/:id/compact', (req, res) => {
+    const s = guardSession(req, res)
+    if (!s) return
+    if (!s.history.length) return res.status(400).json({ error: '会话为空，无需压缩' })
+    void withLock(s.id, async () => {
+      const g: Gen = { controller: new AbortController(), events: [], clients: new Set() }
+      gens.set(s.id, g)
+      const w = makeW(g)
+      attachClient(g, res)
+      const usage: Usage = { prompt: 0, completion: 0, total: 0 }
+      try {
+        await compactContext(s, w, g.controller.signal, usage)
+      } catch (err) {
+        w({ e: errMsg(err) })
+      } finally {
+        w({ d: 1, title: s.title, history: s.history, contextTokens: contextTokens(s.history), lastPromptTokens: s.lastPromptTokens })
+        endAll(g)
+        gens.delete(s.id)
+      }
+    }).catch((err) => {
+      try {
+        res.status(500).json({ error: errMsg(err) })
+      } catch {
+        // 连接已断
+      }
+    })
   })
 
   // 编辑条目

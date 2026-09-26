@@ -239,10 +239,13 @@ export default function App() {
           effort={effort}
           status={chat.status}
           contextTokens={chat.sessions.find((s) => s.id === chat.currentSessionId)?.contextTokens}
+          lastPromptTokens={chat.sessions.find((s) => s.id === chat.currentSessionId)?.lastPromptTokens}
           maxContext={chat.settings.maxContext}
+          busy={chat.busy}
           onToggleSidebar={() => setSidebarOpen((o) => !o)}
           onEffortChange={changeEffort}
           onOpenSettings={() => setSettingsOpen(true)}
+          onCompact={chat.compactContext}
         />
         <div className="relative flex min-h-0 flex-1 flex-col">
           <MessageList

@@ -20,6 +20,7 @@ export interface Session {
   title: string
   history: Entry[]
   createdAt: number
+  lastPromptTokens?: number // 最近一次主请求的精确 prompt_tokens（上游分词器）
 }
 export interface McpServerConfig {
   name: string

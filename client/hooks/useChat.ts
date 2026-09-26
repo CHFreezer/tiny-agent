@@ -23,6 +23,7 @@ interface StreamEvent {
   history?: Entry[]
   usage?: { prompt: number; completion: number; total: number }
   contextTokens?: number
+  lastPromptTokens?: number
 }
 
 export function useChat(effort: string, onError: (message: string) => void) {
@@ -200,6 +201,7 @@ export function useChat(effort: string, onError: (message: string) => void) {
             if (m.history) setHistory(sessionId, m.history)
             if (m.usage) setLastUsage(m.usage)
             if (m.contextTokens !== undefined) setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, contextTokens: m.contextTokens } : s)))
+            if (m.lastPromptTokens !== undefined) setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, lastPromptTokens: m.lastPromptTokens } : s)))
             setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, generating: false } : s)))
             if (m.title) setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, title: m.title! } : s)))
             setGenId(null)
@@ -317,6 +319,14 @@ export function useChat(effort: string, onError: (message: string) => void) {
     },
     [startStream],
   )
+
+  // 手动压缩上下文：服务器生成 summary 条目，m 事件让气泡实时出现在聊天里
+  const compactContext = useCallback(() => {
+    if (busyRef.current) return
+    const cur = currentSessionIdRef.current
+    if (cur == null) return
+    void startStream(cur, `/api/sessions/${cur}/compact`, {})
+  }, [startStream])
 
   // 停止：显式通知服务器中止（生成与连接解耦，断开前端不再停止生成）
   const stop = useCallback(() => {
@@ -456,6 +466,7 @@ export function useChat(effort: string, onError: (message: string) => void) {
     executingId,
     lastUsage,
     retryEntry,
+    compactContext,
     genId,
   }
 }

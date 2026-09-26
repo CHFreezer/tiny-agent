@@ -126,6 +126,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
         addUsage(usage, chunk.usage)
       }
       roundBase = usage.prompt - baseBefore // 本次请求的精确 prompt token 数（上游不支持 usage 时为 0 → 回退全量估算）
+      session.lastPromptTokens = roundBase
     } catch (err) {
       if (opts.signal.aborted) {
         // 用户停止：已输出内容入库（服务器是唯一事实源），无 e 无 d；无任何输出则移除空条目，保持上下文原样
@@ -189,7 +190,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
   }
   if (opts.signal.aborted) return
   if (failed) w({ e: failed })
-  w({ d: 1, title: session.title, history: session.history, contextTokens: contextTokens(session.history), ...(usage.total ? { usage } : {}) })
+  w({ d: 1, title: session.title, history: session.history, contextTokens: contextTokens(session.history), lastPromptTokens: session.lastPromptTokens, ...(usage.total ? { usage } : {}) })
   finish()
 }
 
