@@ -140,6 +140,7 @@ export function EntryContent({
         text={entry.content ?? ''}
         preview={false}
         selectMode={selectMode}
+        error={entry.summaryStatus === 'failed'}
         subline={entry.summaryStatus === 'failed' ? '压缩失败：摘要不完整，此分割点无效，上方对话仍计入上下文' : undefined}
       />
     )
