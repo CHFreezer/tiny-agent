@@ -2,6 +2,8 @@
 
 本地单服务器聊天助手：React 前端 + Express 服务器，对接任意 OpenAI 兼容上游（如 tabbyAPI / llama.cpp server），支持 MCP 插件扩展工具、本地 TTS 朗读。
 
+> **项目状态**：当前为进行中项目，不是可发布的成熟产品；在目标机器上无法运行属于预期情况。
+
 ## 架构
 
 - **服务器是会话状态的唯一事实源**：浏览器只发指令、收 SSE 事件，刷新/重连不丢状态
@@ -61,7 +63,10 @@ npm run dev:server -- --data-dir D:/tiny-agent
 
 ## TTS
 
-设置页开启后，朗读按钮调用 `POST /api/tts`：pwsh 7 + System.Speech（本地 Xiaoxiao 音色）合成 wav 流式返回。需要安装 PowerShell 7。
+设置页开启后，朗读按钮调用 `POST /api/tts`：pwsh 7 + SAPI 5（`System.Speech`）合成 wav 流式返回。
+
+- 依赖：PowerShell 7（`System.Speech` 10 才有 `SetOutputToWaveFile`）+ Windows SAPI 5
+- 音色：优先选择本机已安装的 `Microsoft Xiaoxiao`（排除 Online 版本）；未安装则回退系统默认音色——不假设目标机器装有 Xiaoxiao 神经语音包
 
 ## 脚本
 
@@ -73,7 +78,9 @@ npm run dev:server -- --data-dir D:/tiny-agent
 | `npm run build` | 类型检查 + vite 构建 → `client/dist/` |
 | `npm start` | 生产模式：server 托管 `client/dist/` + API，单端口 3000 |
 
-## 独立发布
+## 独立运行
+
+> 注意：当前非成熟产品，此流程仅在本机验证过；目标机器上无法运行属于预期情况。
 
 ```bash
 npm run build
