@@ -211,6 +211,15 @@ export function useChat(effort: string, onError: (message: string) => void) {
             busyRef.current = false
             if (errMsg) onErrorRef.current(errMsg.slice(0, 200))
             return
+          } else if (m.lastPromptTokens !== undefined || m.lastCompletionTokens !== undefined) {
+            // 实时用量：主请求返回后服务器推送精确值（非结束事件）
+            setSessions((x) =>
+              x.map((s) =>
+                s.id === sessionId
+                  ? { ...s, ...(m.lastPromptTokens !== undefined ? { lastPromptTokens: m.lastPromptTokens } : {}), ...(m.lastCompletionTokens !== undefined ? { lastCompletionTokens: m.lastCompletionTokens } : {}) }
+                  : s,
+              ),
+            )
           }
         }
       }

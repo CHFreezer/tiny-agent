@@ -129,15 +129,21 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
       }
       roundBase = usage.prompt - baseBefore // 本次请求的精确 prompt token 数（上游不支持 usage 时为 0 → 回退全量估算）
       lastCompletion = usage.completion - completionBefore
-      session.lastPromptTokens = roundBase
-      session.lastCompletionTokens = lastCompletion
+      if (roundBase > 0) {
+        // 流中途停止时 usage 未到达（roundBase=0）：保留上次的精确值，不覆盖
+        session.lastPromptTokens = roundBase
+        session.lastCompletionTokens = lastCompletion
+        // 实时用量：每次主请求返回后立刻推送精确值（顶栏不必等生成结束）
+        w({ lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens })
+      }
     } catch (err) {
       if (opts.signal.aborted) {
-        // 用户停止：已输出内容入库（服务器是唯一事实源），无 e 无 d；无任何输出则移除空条目，保持上下文原样
+        // 用户停止：已输出内容入库（服务器是唯一事实源），无 e；d 收尾让所有客户端（含 attach 流）清 busy
         entry.content = full || null
         if (think) entry.reasoning = think
         if (!full && !think && !toolCalls.length) session.history.splice(session.history.indexOf(entry), 1)
         saveSession(session)
+        w({ d: 1, title: session.title, history: session.history, contextTokens: contextTokens(session.history), lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens })
         return
       }
       // 超窗保护：上游 400 prompt 过长 → 压缩一次并重试本轮（覆盖估算残差；压缩自身失败则走 failed）
@@ -192,7 +198,10 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
     }
     pos = session.history.length
   }
-  if (opts.signal.aborted) return
+  if (opts.signal.aborted) {
+    w({ d: 1, title: session.title, history: session.history, contextTokens: contextTokens(session.history), lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens })
+    return
+  }
   if (failed) w({ e: failed })
   w({ d: 1, title: session.title, history: session.history, contextTokens: contextTokens(session.history), lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens, ...(usage.total ? { usage } : {}) })
   finish()
