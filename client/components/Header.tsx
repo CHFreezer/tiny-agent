@@ -118,7 +118,7 @@ export function Header({
                       </span>
                     )}
                     {overflow ? (
-                      <div className="mt-1 text-xs text-red-500">已超窗口，请压缩上下文或删除部分消息</div>
+                      <div className="mt-1 text-xs text-red-500">已超窗口，压缩无法成功，请删除部分消息</div>
                     ) : (
                       <div className="mt-1 text-xs text-muted-foreground">精确值（上次请求实测）</div>
                     )}
@@ -132,7 +132,7 @@ export function Header({
                   </>
                 )}
               </div>
-              <Button size="sm" variant="outline" className="w-full" disabled={busy} onClick={onCompact}>
+              <Button size="sm" variant="outline" className="w-full" disabled={busy || overflow} onClick={onCompact}>
                 {busy ? '压缩中…' : '压缩上下文'}
               </Button>
             </PopoverContent>
