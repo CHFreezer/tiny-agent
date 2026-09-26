@@ -4,7 +4,7 @@ import OpenAI from 'openai'
 import { errMsg, readSettings } from './config.ts'
 import { readMemories } from './memories.ts'
 import { sessions, saveSession } from './sessions.ts'
-import { contextTokens, getOpenAI, normalizeMessage, toApiMessages } from './upstream.ts'
+import { contextTokens, estimateEntries, getOpenAI, normalizeMessage, toApiMessages } from './upstream.ts'
 import { currentTools, executeTool } from './tools.ts'
 import { addUsage, compactContext } from './compact.ts'
 import type { Entry, Session, ToolCall, Usage } from './types.ts'
@@ -34,6 +34,10 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
   let done = false
   const usage: Usage = { prompt: 0, completion: 0, total: 0 }
   let overflowRetried = false // 超窗 400 的自动压缩重试：整个生成过程最多一次（每轮重置会无限循环）
+  let roundBase = 0 // 最近一次主请求的精确 prompt_tokens（上游分词器，usage 末尾 chunk）
+  let basePos = 0 // 该请求覆盖 history[0..basePos)；投影 = 精确基准 + 其后新增条目的估算
+  const projected = () =>
+    roundBase > 0 ? roundBase + estimateEntries(session.history.slice(basePos)) : contextTokens(session.history)
   for (let round = 0; !failed && !done; round++) {
     // 当轮 assistant 条目：立即进入会话（服务器事实永远完整），断点/崩溃后也是合法半截
     const entry: Entry = { id: randomUUID(), role: 'assistant', content: '', ts: Date.now() }
@@ -57,7 +61,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
     }
     if (s.maxContext > 0) {
       // 上下文本身已超窗（如删除压缩气泡后恢复）：直接报错，不尝试自动压缩
-      const used = contextTokens(session.history.filter((e) => e.id !== entry.id))
+      const used = projected()
       if (used > s.maxContext) {
         failed = `当前上下文约 ${used} token，已超过模型窗口（${s.maxContext}），无法自动压缩，请手动删除部分消息后继续`
         break
@@ -81,6 +85,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
       let messages = toApiMessages(session.history.slice(0, pos))
       const memories = readMemories()
       if (memories.length) messages = [{ role: 'developer', content: memories.join('\n') }, ...messages]
+      const baseBefore = usage.prompt
       const stream = await getOpenAI(s.baseUrl, s.apiKey).chat.completions.create(
         {
           model: s.model,
@@ -122,6 +127,8 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
         }
         addUsage(usage, chunk.usage)
       }
+      roundBase = usage.prompt - baseBefore // 本次请求的精确 prompt token 数（上游不支持 usage 时为 0 → 回退全量估算）
+      basePos = pos
     } catch (err) {
       if (opts.signal.aborted) {
         // 用户停止：已输出内容入库（服务器是唯一事实源），无 e 无 d；无任何输出则移除空条目，保持上下文原样
@@ -154,7 +161,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
     saveSession(session)
     if (failed) break
     // 气泡完成后检测压缩触发：已用 > 窗口 - max(32k, 最大输出)（留估算误差余量）
-    if (s.maxContext > 0 && contextTokens(session.history) > s.maxContext - Math.max(32768, s.maxTokens)) {
+    if (s.maxContext > 0 && projected() > s.maxContext - Math.max(32768, s.maxTokens)) {
       await compactContext(session, w, opts.signal, usage)
     }
     if (!toolCalls.length) {
@@ -177,7 +184,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
       te.content = out
       saveSession(session)
       w({ x: te.id, r: out, tc: tc.id, ...(te.images ? { imgs: te.images } : {}) })
-      if (s.maxContext > 0 && contextTokens(session.history) > s.maxContext - Math.max(32768, s.maxTokens)) {
+      if (s.maxContext > 0 && projected() > s.maxContext - Math.max(32768, s.maxTokens)) {
         await compactContext(session, w, opts.signal, usage)
       }
     }
