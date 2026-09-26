@@ -3,8 +3,8 @@ import path from 'node:path'
 import { execFile, execSync } from 'node:child_process'
 import OpenAI from 'openai'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
-import { WORKSPACE_DIR, errMsg } from './config.ts'
-import { MCP_TOOL_TIMEOUT, mcpToolMap } from './mcp.ts'
+import { WORKSPACE_DIR, errMsg, readSettings } from './config.ts'
+import { MCP_TOOL_TIMEOUT, mcpToolMap, mcpTools } from './mcp.ts'
 import type { ToolCall, ToolResult } from './types.ts'
 
 // 内置工具（OpenAI function calling 格式）
@@ -35,6 +35,11 @@ export const READ_IMAGE_TOOL: OpenAI.Chat.ChatCompletionTool = {
       required: ['path'],
     },
   },
+}
+
+// 当前工具集（与生成请求同源）：生成循环与上下文估算共用
+export function currentTools(): OpenAI.Chat.ChatCompletionTool[] {
+  return [...(readSettings().pwsh ? [PWSH_TOOL] : []), READ_IMAGE_TOOL, ...mcpTools()]
 }
 
 // ===== 工具执行（服务器侧） =====

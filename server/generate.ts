@@ -5,8 +5,7 @@ import { errMsg, readSettings } from './config.ts'
 import { readMemories } from './memories.ts'
 import { sessions, saveSession } from './sessions.ts'
 import { contextTokens, getOpenAI, normalizeMessage, toApiMessages } from './upstream.ts'
-import { PWSH_TOOL, READ_IMAGE_TOOL, executeTool } from './tools.ts'
-import { mcpTools } from './mcp.ts'
+import { currentTools, executeTool } from './tools.ts'
 import { addUsage, compactContext } from './compact.ts'
 import type { Entry, Session, ToolCall, Usage } from './types.ts'
 
@@ -34,6 +33,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
   let failed: string | null = null
   let done = false
   const usage: Usage = { prompt: 0, completion: 0, total: 0 }
+  let overflowRetried = false // 超窗 400 的自动压缩重试：整个生成过程最多一次（每轮重置会无限循环）
   for (let round = 0; !failed && !done; round++) {
     // 当轮 assistant 条目：立即进入会话（服务器事实永远完整），断点/崩溃后也是合法半截
     const entry: Entry = { id: randomUUID(), role: 'assistant', content: '', ts: Date.now() }
@@ -77,7 +77,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
       }, 120_000)
     }
     try {
-      const allTools = [...(readSettings().pwsh ? [PWSH_TOOL] : []), READ_IMAGE_TOOL, ...mcpTools()]
+      const allTools = currentTools()
       let messages = toApiMessages(session.history.slice(0, pos))
       const memories = readMemories()
       if (memories.length) messages = [{ role: 'developer', content: memories.join('\n') }, ...messages]
@@ -131,7 +131,14 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
         saveSession(session)
         return
       }
+      // 超窗保护：上游 400 prompt 过长 → 压缩一次并重试本轮（覆盖估算残差；压缩自身失败则走 failed）
+      if (!overflowRetried && s.maxContext > 0 && /exceeds|prompt length|context length|too long/i.test(errMsg(err))) {
+        overflowRetried = true
+        await compactContext(session, w, opts.signal, usage)
+        continue
+      }
       failed = stalled ? '上游生成停滞（120 秒无输出），已中止' : errMsg(err)
+      if (overflowRetried && !stalled) failed += '（已尝试自动压缩，上下文仍超窗，请手动删除部分消息后继续）'
     } finally {
       clearTimeout(stallTimer)
       opts.signal.removeEventListener('abort', onUserAbort)
@@ -146,8 +153,8 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
     }
     saveSession(session)
     if (failed) break
-    // 气泡完成后检测压缩触发：已用 > 窗口 - max(20k, 最大输出)
-    if (s.maxContext > 0 && contextTokens(session.history) > s.maxContext - Math.max(20000, s.maxTokens)) {
+    // 气泡完成后检测压缩触发：已用 > 窗口 - max(32k, 最大输出)（留估算误差余量）
+    if (s.maxContext > 0 && contextTokens(session.history) > s.maxContext - Math.max(32768, s.maxTokens)) {
       await compactContext(session, w, opts.signal, usage)
     }
     if (!toolCalls.length) {
@@ -170,7 +177,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
       te.content = out
       saveSession(session)
       w({ x: te.id, r: out, tc: tc.id, ...(te.images ? { imgs: te.images } : {}) })
-      if (s.maxContext > 0 && contextTokens(session.history) > s.maxContext - Math.max(20000, s.maxTokens)) {
+      if (s.maxContext > 0 && contextTokens(session.history) > s.maxContext - Math.max(32768, s.maxTokens)) {
         await compactContext(session, w, opts.signal, usage)
       }
     }

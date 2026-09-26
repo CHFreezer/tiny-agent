@@ -1,5 +1,6 @@
 import OpenAI from 'openai'
 import { readMemories } from './memories.ts'
+import { currentTools } from './tools.ts'
 import type { Entry } from './types.ts'
 
 // ===== 上游（100% OpenAI 标准，官方 SDK） =====
@@ -108,27 +109,43 @@ export function toApiMessages(history: Entry[]) {
   return sanitizeToolCalls(msgs)
 }
 
-// 当前实际将发送给模型的上下文 token 数（含 developer 记忆注入）
+// 当前实际将发送给模型的上下文 token 数（含 developer 记忆注入 + 工具定义 + 图片）
 export const contextTokens = (history: Entry[]) => {
   const memories = readMemories()
   const messages = memories.length
     ? [{ role: 'developer', content: memories.join('\n') }, ...toApiMessages(history)]
     : toApiMessages(history)
-  return messages.reduce((a, m) => a + messageTokens(m), 0)
+  let n = messages.reduce((a, m) => a + messageTokens(m), 0)
+  n += countTextTokens(JSON.stringify(currentTools())) // 工具定义：每次请求都带完整 schema
+  return n
 }
 
 // ===== 上下文窗口管理：token 估算（压缩触发/超窗检测用） =====
-// 估算：CJK 字符 ≈ 1 token，其他 ≈ 4 字符 1 token（无分词器的工程近似）
+// 估算：CJK 字符 ≈ 1 token，其他 ≈ 3 字符 1 token（上下文以工具输出 YAML/JSON/代码为主，
+// 实测 4 字符/token 低估约 10%；宁可高估——早触发压缩比 400 安全）
 const countTextTokens = (text: string) => {
   let cjk = 0
   let other = 0
   for (const ch of text) (ch.codePointAt(0)! > 0x2e7f ? cjk++ : other++)
-  return cjk + Math.ceil(other / 4)
+  return cjk + Math.ceil(other / 3)
+}
+// 图片 token 估算：VL 模型按 patch 网格计 token，截图经验值 ≈ 原始字节/100（1080p 截图 ~200KB ≈ 2k token）
+const imageTokens = (url: string) => {
+  if (url.startsWith('data:')) {
+    const b64 = url.slice(url.indexOf(',') + 1)
+    return Math.max(256, Math.round(b64.length * 0.75 / 100))
+  }
+  return 1024 // 外部 URL 无法预知尺寸：保守固定值
 }
 const messageTokens = (m: Record<string, unknown>) => {
   let n = 4 // 每条消息的固定开销
   if (typeof m.content === 'string') n += countTextTokens(m.content)
-  if (Array.isArray(m.content)) for (const p of m.content) if (p && p.type === 'text' && typeof p.text === 'string') n += countTextTokens(p.text)
+  if (Array.isArray(m.content))
+    for (const p of m.content) {
+      if (!p) continue
+      if (p.type === 'text' && typeof p.text === 'string') n += countTextTokens(p.text)
+      else if (p.type === 'image_url' && typeof p.image_url?.url === 'string') n += imageTokens(p.image_url.url)
+    }
   if (Array.isArray(m.tool_calls)) n += countTextTokens(JSON.stringify(m.tool_calls))
   if (typeof m.reasoning_content === 'string') n += countTextTokens(m.reasoning_content)
   return n
