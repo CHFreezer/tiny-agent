@@ -133,17 +133,13 @@ export function useChat(effort: string, onError: (message: string) => void) {
             // 权威历史（追加 user / 重试回退后）：整体替换，官方 id 对齐
             setHistory(sessionId, m.h)
           } else if (m.a) {
-            // 新 assistant 条目：按服务器指定位置插入占位；镜像已有（重放场景）则不重复插入
+            // 新 assistant 条目：服务器所有 a/x/m 事件都是追加到历史末尾，直接 append（按绝对 pos 插入会在镜像漂移时错位）；镜像已有（重放场景）则不重复插入
             const aid = m.a
             acc.set(aid, { full: '', think: '', tcs: [] })
-            const pos = m.pos
             setGenId(aid) // 生成索引指示：本轮输出写往该条目，整轮常驻
             setHistoryFn(sessionId, (h) => {
               if (h.some((e) => e.id === aid)) return h
-              const e: Entry = { id: aid, role: 'assistant', content: '' }
-              const next = [...h]
-              next.splice(pos ?? next.length, 0, e)
-              return next
+              return [...h, { id: aid, role: 'assistant', content: '' }]
             })
           } else if (m.id && (m.c || m.r || m.t)) {
             const a = acc.get(m.id)
@@ -169,12 +165,9 @@ export function useChat(effort: string, onError: (message: string) => void) {
             if (m.m.pos !== undefined) {
               acc.set(mid, { full: '', think: '', tcs: [] })
               setGenId(mid)
-              const pos = m.m.pos
               setHistoryFn(sessionId, (h) => {
-                const e: Entry = { id: mid, role: 'summary', content: '' }
-                const next = [...h]
-                next.splice(pos ?? next.length, 0, e)
-                return next
+                if (h.some((e) => e.id === mid)) return h
+                return [...h, { id: mid, role: 'summary', content: '' }]
               })
             } else {
               patchEntry(sessionId, mid, m.m.ok ? {} : { summaryStatus: 'failed' })
@@ -186,13 +179,10 @@ export function useChat(effort: string, onError: (message: string) => void) {
             if (m.r !== undefined) {
               patchEntry(sessionId, xid, { content: m.r, ...(m.imgs ? { images: m.imgs } : {}) })
             } else {
-              const pos = m.pos
               const tc = m.tc ?? ''
               setHistoryFn(sessionId, (h) => {
-                const e: Entry = { id: xid, role: 'tool', tool_call_id: tc, content: '' }
-                const next = [...h]
-                next.splice(pos ?? next.length, 0, e)
-                return next
+                if (h.some((e) => e.id === xid)) return h
+                return [...h, { id: xid, role: 'tool', tool_call_id: tc, content: '' }]
               })
             }
           } else if (m.e) {

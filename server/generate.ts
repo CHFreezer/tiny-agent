@@ -164,6 +164,8 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
     if (toolCalls.length) entry.tool_calls = toolCalls
     if (!full && !think && !toolCalls.length) {
       session.history.splice(session.history.indexOf(entry), 1)
+      // 空条目移除后重发权威历史：客户端镜像同步，避免幽灵空气泡
+      w({ h: session.history })
       if (!failed) failed = '模型返回了空内容，请重试'
     }
     saveSession(session)
