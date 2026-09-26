@@ -10,7 +10,7 @@
 
 ![桌面版](docs/desktop.png)
 
-### 移动版（iPhone 16）
+### 移动版
 
 <p align="center"><img src="docs/mobile.png" width="320" /></p>
 
