@@ -58,6 +58,9 @@ export function Header({
                 <span className="hidden sm:inline">
                   {fmt(contextTokens)} / {fmt(maxContext)} ·{' '}
                 </span>
+                <span className="sm:hidden">
+                  {fmt(contextTokens)}/{fmt(maxContext)}·
+                </span>
                 {pct}%
               </>
             ) : (
