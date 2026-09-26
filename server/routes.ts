@@ -1,4 +1,5 @@
 import express from 'express'
+import OpenAI from 'openai'
 import fs from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { DATA_DIR, SETTINGS_FILE, errMsg, readSettings } from './config.ts'
@@ -15,9 +16,10 @@ import {
   switchSession,
   withLock,
 } from './sessions.ts'
-import { contextTokens, getOpenAI } from './upstream.ts'
+import { contextTokens, getOpenAI, normalizeMessage, toApiMessages } from './upstream.ts'
 import { mcpStatus, syncMcp } from './mcp.ts'
 import { compactContext } from './compact.ts'
+import { currentTools } from './tools.ts'
 import { attachClient, endAll, generate, gens, guardSession, makeW, ndjsonHeaders } from './generate.ts'
 import type { Gen } from './generate.ts'
 import type { Entry, McpServerConfig, Settings, ToolCall, Usage } from './types.ts'
@@ -229,6 +231,54 @@ export function registerRoutes(app: express.Express): void {
         // 连接已断
       }
     })
+  })
+
+  // 查询精确用量：把当前上下文原样发上游（只输出 1 token）取真实 prompt_tokens，与压缩/生成同口径
+  app.get('/api/sessions/:id/usage', async (req, res) => {
+    const s = sessions.get(Number(req.params.id))
+    if (!s) return res.status(404).json({ error: '会话不存在' })
+    if (gens.has(s.id)) return res.status(409).json({ error: '会话正在生成中' })
+    const cfg = readSettings()
+    if (!cfg.baseUrl || !cfg.model) return res.status(400).json({ error: '未配置服务器地址/模型' })
+    try {
+      const memories = readMemories()
+      const messages = (memories.length ? [{ role: 'developer', content: memories.join('\n') }, ...toApiMessages(s.history)] : toApiMessages(s.history)).map(normalizeMessage)
+      const tools = currentTools()
+      const stream = await getOpenAI(cfg.baseUrl, cfg.apiKey).chat.completions.create({
+        model: cfg.model,
+        messages: messages as unknown as OpenAI.Chat.ChatCompletionMessageParam[],
+        ...(tools.length ? { tools } : {}),
+        max_tokens: 1,
+        stream: true,
+        stream_options: { include_usage: true },
+      })
+      let exact = 0
+      for await (const chunk of stream) {
+        if (chunk.usage?.prompt_tokens) exact = chunk.usage.prompt_tokens
+      }
+      if (exact > 0) {
+        await withLock(s.id, async () => {
+          s.lastPromptTokens = exact
+          saveSession(s)
+        })
+      }
+      res.json({ promptTokens: exact })
+    } catch (err) {
+      const msg = errMsg(err)
+      // 超窗 400：错误消息里带真实 prompt 长度——测量成功，且说明该压缩了
+      if (/exceeds|context size|too long|prompt length/i.test(msg)) {
+        const m = /prompt length (\d+)/i.exec(msg)
+        const exact = m ? Number(m[1]) : 0
+        if (exact > 0) {
+          await withLock(s.id, async () => {
+            s.lastPromptTokens = exact
+            saveSession(s)
+          })
+        }
+        return res.json({ promptTokens: exact, overflow: true })
+      }
+      res.status(502).json({ error: msg })
+    }
   })
 
   // 编辑条目

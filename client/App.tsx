@@ -246,6 +246,7 @@ export default function App() {
           onEffortChange={changeEffort}
           onOpenSettings={() => setSettingsOpen(true)}
           onCompact={chat.compactContext}
+          onRefreshUsage={() => chat.refreshUsage()}
         />
         <div className="relative flex min-h-0 flex-1 flex-col">
           <MessageList

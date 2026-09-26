@@ -328,6 +328,22 @@ export function useChat(effort: string, onError: (message: string) => void) {
     void startStream(cur, `/api/sessions/${cur}/compact`, {})
   }, [startStream])
 
+  // 查询精确用量：上游 1-token 请求实测 prompt_tokens（旧会话无精确值时按需获取）
+  const refreshUsage = useCallback(async (): Promise<boolean> => {
+    const cur = currentSessionIdRef.current
+    if (cur == null) return false
+    try {
+      const r = await fetch(`/api/sessions/${cur}/usage`)
+      const d = (await r.json().catch(() => null)) as { promptTokens?: number } | null
+      if (!d || d.promptTokens == null || d.promptTokens <= 0) return false
+      setSessions((x) => x.map((s) => (s.id === cur ? { ...s, lastPromptTokens: d.promptTokens } : s)))
+      return true
+    } catch {
+      // 服务器不可达：忽略
+      return false
+    }
+  }, [setSessions])
+
   // 停止：显式通知服务器中止（生成与连接解耦，断开前端不再停止生成）
   const stop = useCallback(() => {
     const cur = currentSessionIdRef.current
@@ -467,6 +483,7 @@ export function useChat(effort: string, onError: (message: string) => void) {
     lastUsage,
     retryEntry,
     compactContext,
+    refreshUsage,
     genId,
   }
 }

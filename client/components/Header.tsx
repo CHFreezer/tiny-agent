@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { PanelLeft, Gauge, Brain } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -30,6 +31,7 @@ export function Header({
   onEffortChange,
   onOpenSettings,
   onCompact,
+  onRefreshUsage,
 }: {
   effort: string
   status: string
@@ -41,11 +43,18 @@ export function Header({
   onEffortChange: (v: string) => void
   onOpenSettings: () => void
   onCompact: () => void
+  onRefreshUsage: () => Promise<boolean>
 }) {
+  const [measuring, setMeasuring] = useState(false)
+  // 精确值到手（生成结束/刷新完成）后停止"测量中"提示
+  useEffect(() => {
+    if (lastPromptTokens && lastPromptTokens > 0) setMeasuring(false)
+  }, [lastPromptTokens])
   const pct = contextTokens != null && maxContext > 0 ? Math.min(100, Math.round((contextTokens / maxContext) * 100)) : null
   const fmt = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k` : String(n))
   // 面板主数值：精确（上次请求上游实测）优先，无则估算
   const exact = lastPromptTokens && lastPromptTokens > 0 ? lastPromptTokens : null
+  const overflow = exact != null && maxContext > 0 && exact > maxContext
   const pctExact = exact != null && maxContext > 0 ? Math.min(100, Math.round((exact / maxContext) * 100)) : null
   return (
     <header className="flex items-center gap-2 px-4 py-2.5 border-b border-border">
@@ -56,8 +65,19 @@ export function Header({
       <span className="text-xs text-muted-foreground">{status}</span>
       <div className="ml-auto flex items-center gap-2">
         {contextTokens != null && (
-          <Popover>
+          <Popover
+            onOpenChange={(open) => {
+              // 无精确值（旧会话）：打开面板时向上游实测一次
+              if (open && (!lastPromptTokens || lastPromptTokens <= 0)) {
+                setMeasuring(true)
+                void onRefreshUsage().then((ok) => {
+                  if (!ok) setMeasuring(false)
+                })
+              }
+            }}
+          >
             <PopoverTrigger
+              nativeButton={false}
               render={
                 <span
                   className={cn(
@@ -85,16 +105,20 @@ export function Header({
               <div className="text-sm tabular-nums">
                 {exact != null ? (
                   <>
-                    <span className="font-medium">{exact.toLocaleString()}</span>
+                    <span className={cn('font-medium', overflow && 'text-red-500')}>{exact.toLocaleString()}</span>
                     {maxContext > 0 && (
                       <span className="text-muted-foreground">
                         {' '}
                         / {maxContext.toLocaleString()} token（{pctExact}%）
                       </span>
                     )}
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      精确值（上次请求实测）· 当前估算 {contextTokens.toLocaleString()}
-                    </div>
+                    {overflow ? (
+                      <div className="mt-1 text-xs text-red-500">已超窗口，请压缩上下文或删除部分消息</div>
+                    ) : (
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        精确值（上次请求实测）· 当前估算 {contextTokens.toLocaleString()}
+                      </div>
+                    )}
                   </>
                 ) : (
                   <>
@@ -105,7 +129,9 @@ export function Header({
                         / {maxContext.toLocaleString()} token（{pct}%）
                       </span>
                     )}
-                    <div className="mt-1 text-xs text-muted-foreground">估算值（本会话尚无精确用量）</div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {measuring ? '正在向上游实测精确用量…' : '估算值（本会话尚无精确用量）'}
+                    </div>
                   </>
                 )}
               </div>
