@@ -120,9 +120,6 @@ export const contextTokens = (history: Entry[]) => {
   return n
 }
 
-// 一组条目的 token 估算（增量估算用：精确基准 + 只估新增部分）
-export const estimateEntries = (entries: Entry[]) =>
-  toApiMessages(entries).reduce((a, m) => a + messageTokens(m), 0)
 
 // ===== 上下文窗口管理：token 估算（压缩触发/超窗检测用） =====
 // 估算：CJK 字符 ≈ 1 token，其他 ≈ 3 字符 1 token（上下文以工具输出 YAML/JSON/代码为主，
