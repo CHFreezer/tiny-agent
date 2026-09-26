@@ -177,6 +177,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
     // 气泡完成后检测压缩触发：上次请求的精确 prompt > 窗口 - max(20k, 最大输出)
     if (s.maxContext > 0 && roundBase > 0 && roundBase > s.maxContext - Math.max(20000, s.maxTokens)) {
       await compactContext(session, w, opts.signal, usage)
+      roundBase = 0 // 压缩后上下文已缩减，旧 prompt 值失效：防止本轮工具结果后二次触发压缩
     }
     if (!toolCalls.length) {
       done = true
