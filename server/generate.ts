@@ -2,10 +2,9 @@ import express from 'express'
 import { randomUUID } from 'node:crypto'
 import OpenAI from 'openai'
 import { errMsg, readSettings } from './config.ts'
-import { readMemories } from './memories.ts'
 import { sessions, saveSession } from './sessions.ts'
-import { contextTokens, getOpenAI, normalizeMessage, toApiMessages } from './upstream.ts'
-import { currentTools, executeTool } from './tools.ts'
+import { buildChatRequest, contextTokens, getOpenAI } from './upstream.ts'
+import { executeTool } from './tools.ts'
 import { addUsage, compactContext } from './compact.ts'
 import type { Entry, Session, ToolCall, Usage } from './types.ts'
 
@@ -83,27 +82,14 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
     }
     const t0 = Date.now() // 本轮请求起点：空流时区分 prefill 超时与模型真空输出
     try {
-      const allTools = currentTools()
-      let messages = toApiMessages(session.history.slice(0, pos))
-      const memories = readMemories()
-      if (memories.length) {
-        // developer 记忆消息插在 system 之后（SYSTEM→DEVELOPER 顺序），保持与历史前缀一致
-        const devMsg = { role: 'developer', content: memories.join('\n') }
-        const sysIdx = messages.findIndex((m) => m.role === 'system')
-        messages.splice(sysIdx >= 0 ? sysIdx + 1 : 0, 0, devMsg)
-      }
       const baseBefore = usage.prompt
       const completionBefore = usage.completion
       const stream = await getOpenAI(s.baseUrl, s.apiKey).chat.completions.create(
-        {
-          model: s.model,
-          messages: messages.map(normalizeMessage) as unknown as OpenAI.Chat.ChatCompletionMessageParam[],
-          stream: true,
-          stream_options: { include_usage: true },
-          ...(allTools.length ? { tools: allTools } : {}),
-          ...(s.maxTokens > 0 ? { max_tokens: s.maxTokens } : {}),
-          ...(s.effort ? { reasoning_effort: s.effort as OpenAI.ReasoningEffort } : {}),
-        },
+        buildChatRequest({
+          history: session.history.slice(0, pos),
+          maxTokens: s.maxTokens,
+          reasoningEffort: s.effort,
+        }),
         { signal: stallCtl.signal },
       )
       armStall()

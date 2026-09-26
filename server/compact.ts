@@ -1,10 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import OpenAI from 'openai'
 import { errMsg, readSettings } from './config.ts'
 import { saveSession } from './sessions.ts'
-import { getOpenAI, normalizeMessage, toApiMessages } from './upstream.ts'
+import { buildChatRequest, getOpenAI } from './upstream.ts'
 import type { Entry, Session, Usage } from './types.ts'
-import { readMemories } from './memories.ts'
 
 // ===== 自动上下文压缩 =====
 // 每个气泡完成后检测：已用 token > 窗口 - max(20k, 最大输出) 时，对当前有效上下文生成结构化摘要，
@@ -70,25 +68,13 @@ export async function compactContext(session: Session, w: (o: unknown) => void, 
   let streamErr: string | null = null
   try {
     // 输入 = 当前有效上下文（排除本气泡，沿用已有分割点）+ 摘要指令
-    // developer 记忆消息插在 system 之后（与主请求 SYSTEM→DEVELOPER 顺序一致），前缀对齐避免 cache miss
-    const memories = readMemories()
-    const messages = [
-      ...toApiMessages(session.history.filter((e) => e.id !== entry.id)),
-      { role: 'user', content: SUMMARY_PROMPT },
-    ]
-    if (memories.length) {
-      const devMsg = { role: 'developer', content: memories.join('\n') }
-      const sysIdx = messages.findIndex((m) => m.role === 'system')
-      messages.splice(sysIdx >= 0 ? sysIdx + 1 : 0, 0, devMsg)
-    }
+    // 与主请求共用 buildChatRequest 构建，前缀/tools 完全一致避免 cache miss
     const stream = await getOpenAI(s.baseUrl, s.apiKey).chat.completions.create(
-      {
-        model: s.model,
-        messages: messages.map(normalizeMessage) as unknown as OpenAI.Chat.ChatCompletionMessageParam[],
-        stream: true,
-        stream_options: { include_usage: true },
-        max_tokens: 16384,
-      },
+      buildChatRequest({
+        history: session.history.filter((e) => e.id !== entry.id),
+        extra: [{ role: 'user', content: SUMMARY_PROMPT }],
+        maxTokens: 16384,
+      }),
       { signal },
     )
     for await (const chunk of stream) {

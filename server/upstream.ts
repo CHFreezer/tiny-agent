@@ -1,6 +1,7 @@
 import OpenAI from 'openai'
 import { readMemories } from './memories.ts'
 import { currentTools } from './tools.ts'
+import { readSettings } from './config.ts'
 import type { Entry } from './types.ts'
 
 // ===== 上游（100% OpenAI 标准，官方 SDK） =====
@@ -107,6 +108,37 @@ export function toApiMessages(history: Entry[]) {
   for (const m of history.slice(sumIdx + 1)) msgs.push(...mapEntry(m))
   msgs.push({ role: 'user', content: '从这里继续调用工具或者给出答案' })
   return sanitizeToolCalls(msgs)
+}
+
+// 构建发往 OpenAI SDK 的完整请求载荷——主请求与压缩请求共用此唯一实现，
+// 保证消息构建 + developer 注入 + tools 完全一致，杜绝两套实现分叉导致前缀 cache miss。
+// history 由调用方切片/过滤后传入；extra 追加在末尾（压缩请求的摘要指令）；
+// maxTokens/reasoningEffort 是两请求仅有的合法差异。
+export function buildChatRequest(opts: {
+  history: Entry[]
+  extra?: Record<string, unknown>[]
+  maxTokens?: number
+  reasoningEffort?: string
+}) {
+  const s = readSettings()
+  const allTools = currentTools()
+  let messages = toApiMessages(opts.history)
+  const memories = readMemories()
+  if (memories.length) {
+    const devMsg = { role: 'developer', content: memories.join('\n') }
+    const sysIdx = messages.findIndex((m) => m.role === 'system')
+    messages.splice(sysIdx >= 0 ? sysIdx + 1 : 0, 0, devMsg)
+  }
+  if (opts.extra?.length) messages = [...messages, ...opts.extra]
+  return {
+    model: s.model,
+    messages: messages.map(normalizeMessage) as unknown as OpenAI.Chat.ChatCompletionMessageParam[],
+    stream: true,
+    stream_options: { include_usage: true },
+    ...(allTools.length ? { tools: allTools } : {}),
+    ...(opts.maxTokens ? { max_tokens: opts.maxTokens } : {}),
+    ...(opts.reasoningEffort ? { reasoning_effort: opts.reasoningEffort as OpenAI.ReasoningEffort } : {}),
+  }
 }
 
 // 当前实际将发送给模型的上下文 token 数（含 developer 记忆注入 + 工具定义 + 图片）
