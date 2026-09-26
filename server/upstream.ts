@@ -110,15 +110,13 @@ export function toApiMessages(history: Entry[]) {
   return sanitizeToolCalls(msgs)
 }
 
-// 构建发往 OpenAI SDK 的完整请求载荷——主请求与压缩请求共用此唯一实现，
-// 保证消息构建 + developer 注入 + tools 完全一致，杜绝两套实现分叉导致前缀 cache miss。
-// history 由调用方切片/过滤后传入；extra 追加在末尾（压缩请求的摘要指令）；
-// maxTokens/reasoningEffort 是两请求仅有的合法差异。
+// 构建发往 OpenAI SDK 的完整请求载荷——主请求与压缩请求共用此唯一实现。
+// 除 history（调用方切片/过滤）与 extra（压缩请求的摘要指令）外，所有字段
+// （model/tools/max_tokens/reasoning_effort/developer 注入）都从 settings 读取，
+// 调用方无法传入任何会改变请求的字段——从结构上杜绝两请求分叉导致前缀 cache miss。
 export function buildChatRequest(opts: {
   history: Entry[]
   extra?: Record<string, unknown>[]
-  maxTokens?: number
-  reasoningEffort?: string
 }) {
   const s = readSettings()
   const allTools = currentTools()
@@ -136,8 +134,8 @@ export function buildChatRequest(opts: {
     stream: true,
     stream_options: { include_usage: true },
     ...(allTools.length ? { tools: allTools } : {}),
-    ...(opts.maxTokens ? { max_tokens: opts.maxTokens } : {}),
-    ...(opts.reasoningEffort ? { reasoning_effort: opts.reasoningEffort as OpenAI.ReasoningEffort } : {}),
+    ...(s.maxTokens > 0 ? { max_tokens: s.maxTokens } : {}),
+    ...(s.effort ? { reasoning_effort: s.effort as OpenAI.ReasoningEffort } : {}),
   }
 }
 
