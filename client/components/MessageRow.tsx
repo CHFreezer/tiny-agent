@@ -74,18 +74,16 @@ export function MessageRow({
           : entry.role === 'summary'
             ? 'border-0 bg-transparent shadow-none px-0 py-1 max-w-full'
     : 'border border-border bg-card text-foreground max-w-[85%]'
-  // 完全空的条目（无正文/思考/工具调用）不渲染气泡壳；生成中的空条目只渲染指示器
+  // 完全空的条目（无正文/思考/工具调用）不渲染气泡壳
   const isEmpty = !entry.content && !entry.reasoning && !entry.tool_calls?.length
 
   return (
     <div className={cn('group flex flex-col gap-1', entry.role === 'user' ? 'items-end' : 'items-stretch')}>
-      {(!isEmpty || generating) && (
+      {!isEmpty && (
       <div
         className={cn(
           'relative rounded-xl px-3.5 py-2.5 text-sm leading-relaxed break-words shadow-sm',
           bubbleClass,
-          // 生成中的空条目：气泡收缩到内容宽（只包住指示器），避免满宽空气泡
-          isEmpty && generating && (entry.role === 'user' ? 'self-end' : 'self-start'),
           selected && 'ring-2 ring-primary/60',
           selectMode && 'cursor-pointer',
         )}
@@ -122,17 +120,15 @@ export function MessageRow({
         ) : (
           <EntryContent entry={entry} executing={executing} selectMode={selectMode} />
         )}
-        {generating && (
-          // 生成索引指示：常驻气泡内，相对气泡居中
-          <div className="flex justify-center pt-1">
-            <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-1">
-              <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/60" />
-              <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/60 [animation-delay:0.15s]" />
-              <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/60 [animation-delay:0.3s]" />
-            </span>
-          </div>
-        )}
       </div>
+      )}
+      {generating && (
+        // 生成索引指示：放在当前生成 item 的下方
+        <div className="flex items-center gap-1 self-start pl-1">
+          <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/60" />
+          <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/60 [animation-delay:0.15s]" />
+          <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/60 [animation-delay:0.3s]" />
+        </div>
       )}
       {!editing && (
         <div className={cn('flex items-center gap-1', !selected && 'hover-reveal')}>
