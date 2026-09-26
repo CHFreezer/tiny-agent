@@ -54,6 +54,7 @@ export function Header({
             title={maxContext > 0 ? `当前上下文 ${contextTokens} / ${maxContext} token（${pct}%）` : `当前上下文 ${contextTokens} token（未设窗口上限）`}
           >
             <Gauge className="size-3.5 shrink-0 sm:hidden" />
+            <span className="hidden sm:inline">用量 </span>
             {pct != null ? (
               <>
                 <span className="hidden sm:inline">
@@ -67,9 +68,9 @@ export function Header({
           </span>
         )}
         <span className="hidden text-xs text-muted-foreground sm:inline">思考强度</span>
+        <Brain className="size-3.5 shrink-0 sm:hidden" />
         <Select value={effort} onValueChange={(v) => onEffortChange(v ?? '')}>
-          <SelectTrigger className="w-[92px] sm:w-[80px] gap-1">
-            <Brain className="size-3.5 shrink-0 sm:hidden" />
+          <SelectTrigger className="w-[80px]">
             <span className="truncate">{EFFORT_OPTIONS.find((o) => o.value === effort)?.label ?? "标准"}</span>
           </SelectTrigger>
           <SelectContent>
