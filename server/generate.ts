@@ -184,6 +184,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
       await compactContext(session, w, opts.signal, usage)
       roundBase = 0 // 压缩后上下文已缩减，旧 prompt 值失效：防止本轮工具结果后二次触发压缩
     }
+    if (opts.signal.aborted) break // 压缩期间停止：不进入工具轮（否则末尾多一个工具结果气泡）
     if (!toolCalls.length) {
       done = true
       break

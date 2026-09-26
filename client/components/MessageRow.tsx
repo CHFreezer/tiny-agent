@@ -80,7 +80,7 @@ export function MessageRow({
   return (
     <div className={cn('group flex flex-col gap-1', entry.role === 'user' ? 'items-end' : entry.role === 'summary' ? 'items-center' : 'items-stretch')}>
       {entry.role === 'summary' && <div className="h-px w-full bg-border" />}
-      {(!isEmpty || generating) && (
+      {(!isEmpty || generating || entry.role === 'summary') && (
       <div
         className={cn(
           'relative rounded-xl px-3.5 py-2.5 text-sm leading-relaxed break-words shadow-sm',
