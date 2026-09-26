@@ -86,7 +86,7 @@ export function MessageRow({
           'relative rounded-xl px-3.5 py-2.5 text-sm leading-relaxed break-words shadow-sm',
           bubbleClass,
           // 生成中的空条目：气泡收缩到内容宽（只包住指示器），避免满宽空气泡
-          isEmpty && generating && (entry.role === 'user' ? 'self-end' : 'self-start'),
+          isEmpty && generating && entry.role !== 'summary' && (entry.role === 'user' ? 'self-end' : 'self-start'),
           selected && 'ring-2 ring-primary/60',
           selectMode && 'cursor-pointer',
         )}

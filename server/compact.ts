@@ -4,6 +4,7 @@ import { errMsg, readSettings } from './config.ts'
 import { saveSession } from './sessions.ts'
 import { getOpenAI, normalizeMessage, toApiMessages } from './upstream.ts'
 import type { Entry, Session, Usage } from './types.ts'
+import { readMemories } from './memories.ts'
 
 // ===== 自动上下文压缩 =====
 // 每个气泡完成后检测：已用 token > 窗口 - max(20k, 最大输出) 时，对当前有效上下文生成结构化摘要，
@@ -69,7 +70,10 @@ export async function compactContext(session: Session, w: (o: unknown) => void, 
   let streamErr: string | null = null
   try {
     // 输入 = 当前有效上下文（排除本气泡，沿用已有分割点）+ 摘要指令
+    // 前置 developer 记忆消息必须与主请求逐字一致：否则前缀在开头就分叉 → 上游 prompt cache miss（从零 prefill）
+    const memories = readMemories()
     const messages = [
+      ...(memories.length ? [{ role: 'developer', content: memories.join('\n') }] : []),
       ...toApiMessages(session.history.filter((e) => e.id !== entry.id)),
       { role: 'user', content: SUMMARY_PROMPT },
     ]
