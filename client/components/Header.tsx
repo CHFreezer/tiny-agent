@@ -1,4 +1,4 @@
-import { PanelLeft } from 'lucide-react'
+import { PanelLeft, Gauge, Brain } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import {
@@ -48,18 +48,16 @@ export function Header({
         {contextTokens != null && (
           <span
             className={cn(
-              'text-xs tabular-nums',
+              'flex items-center gap-1 text-xs tabular-nums',
               pct != null && pct >= 95 ? 'text-red-500' : pct != null && pct >= 80 ? 'text-amber-500' : 'text-muted-foreground',
             )}
             title={maxContext > 0 ? `当前上下文 ${contextTokens} / ${maxContext} token（${pct}%）` : `当前上下文 ${contextTokens} token（未设窗口上限）`}
           >
+            <Gauge className="size-3.5 shrink-0 sm:hidden" />
             {pct != null ? (
               <>
                 <span className="hidden sm:inline">
                   {fmt(contextTokens)} / {fmt(maxContext)} ·{' '}
-                </span>
-                <span className="sm:hidden">
-                  {fmt(contextTokens)}/{fmt(maxContext)}·
                 </span>
                 {pct}%
               </>
@@ -70,7 +68,8 @@ export function Header({
         )}
         <span className="hidden text-xs text-muted-foreground sm:inline">思考强度</span>
         <Select value={effort} onValueChange={(v) => onEffortChange(v ?? '')}>
-          <SelectTrigger className="w-[80px]">
+          <SelectTrigger className="w-[92px] sm:w-[80px] gap-1">
+            <Brain className="size-3.5 shrink-0 sm:hidden" />
             <span className="truncate">{EFFORT_OPTIONS.find((o) => o.value === effort)?.label ?? "标准"}</span>
           </SelectTrigger>
           <SelectContent>
