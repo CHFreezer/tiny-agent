@@ -21,7 +21,7 @@
 
 ```
 client/          前端全部（index.html 入口、组件、hooks、vite/tsconfig/shadcn 配置、dist/ 构建产物）
-server/          服务器全部（index.ts 单文件 + tts.ps1）
+server/          服务器全部（多模块：index 装配 / routes 路由 / generate 生成核心 / sessions 存储 / upstream 上游 / mcp / tools / compact 压缩 / tts / config / memories / types + tts.ps1）
 ```
 
 运行时数据与源码分离，位于数据目录（见下），安装目录可只读。

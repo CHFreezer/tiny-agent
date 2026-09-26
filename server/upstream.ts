@@ -1,0 +1,135 @@
+import OpenAI from 'openai'
+import { readMemories } from './memories.ts'
+import type { Entry } from './types.ts'
+
+// ===== 上游（100% OpenAI 标准，官方 SDK） =====
+const clients = new Map<string, OpenAI>()
+export function getOpenAI(base: string, apiKey = ''): OpenAI {
+  const key = `${base}::${apiKey}`
+  let c = clients.get(key)
+  if (!c) {
+    c = new OpenAI({ baseURL: base, apiKey: apiKey || 'not-needed' })
+    clients.set(key, c)
+  }
+  return c
+}
+
+// 消息规范化：OpenAI 客户端在 content 为 null 且带 tool_calls 时按空串序列化，
+// 部分后端（vLLM/llama.cpp 等）不接受 assistant 空内容 → 补 ""
+export const normalizeMessage = (m: unknown): Record<string, unknown> => {
+  const o = { ...(m as Record<string, unknown>) }
+  if (o.role === 'assistant' && o.tool_calls && o.content == null) o.content = ''
+  return o
+}
+
+// 会话历史 → OpenAI 标准消息
+// 上下文分割点：最近一次成功的压缩气泡；其前历史（含更早压缩气泡）不计入当前上下文
+// 悬挂工具调用消毒：停止/崩溃后 assistant 可能带 tool_calls 而无（完整）tool 结果——上游会 400。
+// 结果缺失时丢弃 tool_calls（保留文本/思考）及配套的孤儿 tool 结果；整条变空壳则删除
+export function sanitizeToolCalls(msgs: Record<string, unknown>[]): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = []
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i]
+    if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length) {
+      const missing = new Set(m.tool_calls.map((t: { id: string }) => t.id))
+      let j = i + 1
+      while (j < msgs.length && msgs[j].role === 'tool') {
+        missing.delete(msgs[j].tool_call_id as string)
+        j++
+      }
+      if (missing.size) {
+        const { tool_calls: _tc, ...rest } = m
+        if (rest.content != null || rest.reasoning_content) out.push(rest)
+        i = j - 1
+        continue
+      }
+    }
+    out.push(m)
+  }
+  return out
+}
+
+export function toApiMessages(history: Entry[]) {
+  const mapEntry = (m: Entry): Record<string, unknown>[] => {
+    if (m.role === 'assistant' && m.tool_calls?.length) {
+      const e: Record<string, unknown> = {
+        role: 'assistant',
+        content: m.content ?? null,
+        tool_calls: m.tool_calls.map((tc) => ({
+          id: tc.id,
+          type: 'function',
+          function: { name: tc.name, arguments: tc.arguments },
+        })),
+      }
+      // reasoning_content 回喂：让模型看到上一轮推理过程（思考连续性）；
+      // 历史条目一旦生成即稳定，前缀一致不破坏 prompt cache；不认该字段的服务器忽略
+      if (m.reasoning) e.reasoning_content = m.reasoning
+      return [e]
+    }
+    if (m.role === 'tool') {
+      const out: Record<string, unknown>[] = [{ role: 'tool', tool_call_id: m.tool_call_id, content: m.content }]
+      // 带图工具结果（read_image）：tool 消息只能是文本，图片以紧随的 user 消息注入
+      if (m.images?.length) {
+        const content: Array<Record<string, unknown>> = [{ type: 'text', text: '以下是读取的图片：' }]
+        for (const url of m.images) content.push({ type: 'image_url', image_url: { url } })
+        out.push({ role: 'user', content })
+      }
+      return out
+    }
+    if (m.role === 'assistant' && m.reasoning) {
+      return [{ role: 'assistant', content: m.content, reasoning_content: m.reasoning }]
+    }
+    if (m.role === 'user' && m.images?.length) {
+      const content: Array<Record<string, unknown>> = []
+      if (m.content) content.push({ type: 'text', text: m.content })
+      for (const url of m.images) content.push({ type: 'image_url', image_url: { url } })
+      return [{ role: 'user', content }]
+    }
+    return [{ role: m.role, content: m.content }]
+  }
+  let sumIdx = -1
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i].role === 'summary' && !history[i].summaryStatus) {
+      sumIdx = i
+      break
+    }
+  }
+  if (sumIdx < 0) {
+    return sanitizeToolCalls(history.filter((m) => !(m.role === 'system' && !m.content?.trim())).flatMap(mapEntry))
+  }
+  const msgs: Record<string, unknown>[] = []
+  for (const m of history.slice(0, sumIdx)) {
+    if (m.role === 'system' && m.content?.trim()) msgs.push({ role: 'system', content: m.content })
+  }
+  msgs.push({ role: 'user', content: 'What did we do so far?' })
+  msgs.push({ role: 'assistant', content: history[sumIdx].content ?? '' })
+  for (const m of history.slice(sumIdx + 1)) msgs.push(...mapEntry(m))
+  msgs.push({ role: 'system', content: '从这里继续调用工具或者给出答案' })
+  return sanitizeToolCalls(msgs)
+}
+
+// 当前实际将发送给模型的上下文 token 数（含 developer 记忆注入）
+export const contextTokens = (history: Entry[]) => {
+  const memories = readMemories()
+  const messages = memories.length
+    ? [{ role: 'developer', content: memories.join('\n') }, ...toApiMessages(history)]
+    : toApiMessages(history)
+  return messages.reduce((a, m) => a + messageTokens(m), 0)
+}
+
+// ===== 上下文窗口管理：token 估算（压缩触发/超窗检测用） =====
+// 估算：CJK 字符 ≈ 1 token，其他 ≈ 4 字符 1 token（无分词器的工程近似）
+const countTextTokens = (text: string) => {
+  let cjk = 0
+  let other = 0
+  for (const ch of text) (ch.codePointAt(0)! > 0x2e7f ? cjk++ : other++)
+  return cjk + Math.ceil(other / 4)
+}
+const messageTokens = (m: Record<string, unknown>) => {
+  let n = 4 // 每条消息的固定开销
+  if (typeof m.content === 'string') n += countTextTokens(m.content)
+  if (Array.isArray(m.content)) for (const p of m.content) if (p && p.type === 'text' && typeof p.text === 'string') n += countTextTokens(p.text)
+  if (Array.isArray(m.tool_calls)) n += countTextTokens(JSON.stringify(m.tool_calls))
+  if (typeof m.reasoning_content === 'string') n += countTextTokens(m.reasoning_content)
+  return n
+}
