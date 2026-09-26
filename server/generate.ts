@@ -66,18 +66,20 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
         break
       }
     }
-    // 上游停滞保护：120 秒无任何输出即中止（上游卡死会把会话永久锁在生成中）
+    // 上游停滞保护：生成阶段 120 秒无输出即中止（上游卡死会把会话永久锁在生成中）；
+    // prefill 阶段（首 chunk 前）放宽到 600 秒——大上下文 prefill 可达数分钟（~1000 tps × 20 万 token ≈ 200s）
     const stallCtl = new AbortController()
     const onUserAbort = () => stallCtl.abort()
     opts.signal.addEventListener('abort', onUserAbort)
     let stallTimer: NodeJS.Timeout | undefined
     let stalled = false
+    let gotFirstChunk = false
     const armStall = () => {
       clearTimeout(stallTimer)
       stallTimer = setTimeout(() => {
         stalled = true
         stallCtl.abort()
-      }, 120_000)
+      }, gotFirstChunk ? 120_000 : 600_000)
     }
     const t0 = Date.now() // 本轮请求起点：空流时区分 prefill 超时与模型真空输出
     try {
@@ -101,6 +103,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
       )
       armStall()
         for await (const chunk of stream) {
+          gotFirstChunk = true
           armStall()
           if (opts.signal.aborted) break
         const delta = chunk.choices?.[0]?.delta as (OpenAI.Chat.ChatCompletionChunk.Choice.Delta & { reasoning_content?: string }) | undefined
