@@ -35,6 +35,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
   const usage: Usage = { prompt: 0, completion: 0, total: 0 }
   let overflowRetried = false // 超窗 400 的自动压缩重试：整个生成过程最多一次（每轮重置会无限循环）
   let roundBase = 0 // 最近一次主请求的精确 prompt_tokens（上游分词器，usage 末尾 chunk）
+  let lastCompletion = 0 // 最近一次主请求响应的精确 completion_tokens
   for (let round = 0; !failed && !done; round++) {
     // 当轮 assistant 条目：立即进入会话（服务器事实永远完整），断点/崩溃后也是合法半截
     const entry: Entry = { id: randomUUID(), role: 'assistant', content: '', ts: Date.now() }
@@ -84,6 +85,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
       const memories = readMemories()
       if (memories.length) messages = [{ role: 'developer', content: memories.join('\n') }, ...messages]
       const baseBefore = usage.prompt
+      const completionBefore = usage.completion
       const stream = await getOpenAI(s.baseUrl, s.apiKey).chat.completions.create(
         {
           model: s.model,
@@ -126,7 +128,9 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
         addUsage(usage, chunk.usage)
       }
       roundBase = usage.prompt - baseBefore // 本次请求的精确 prompt token 数（上游不支持 usage 时为 0 → 回退全量估算）
+      lastCompletion = usage.completion - completionBefore
       session.lastPromptTokens = roundBase
+      session.lastCompletionTokens = lastCompletion
     } catch (err) {
       if (opts.signal.aborted) {
         // 用户停止：已输出内容入库（服务器是唯一事实源），无 e 无 d；无任何输出则移除空条目，保持上下文原样
@@ -190,7 +194,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
   }
   if (opts.signal.aborted) return
   if (failed) w({ e: failed })
-  w({ d: 1, title: session.title, history: session.history, contextTokens: contextTokens(session.history), lastPromptTokens: session.lastPromptTokens, ...(usage.total ? { usage } : {}) })
+  w({ d: 1, title: session.title, history: session.history, contextTokens: contextTokens(session.history), lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens, ...(usage.total ? { usage } : {}) })
   finish()
 }
 

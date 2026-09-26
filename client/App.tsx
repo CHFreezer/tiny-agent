@@ -238,8 +238,8 @@ export default function App() {
         <Header
           effort={effort}
           status={chat.status}
-          contextTokens={chat.sessions.find((s) => s.id === chat.currentSessionId)?.contextTokens}
           lastPromptTokens={chat.sessions.find((s) => s.id === chat.currentSessionId)?.lastPromptTokens}
+          lastCompletionTokens={chat.sessions.find((s) => s.id === chat.currentSessionId)?.lastCompletionTokens}
           maxContext={chat.settings.maxContext}
           busy={chat.busy}
           onToggleSidebar={() => setSidebarOpen((o) => !o)}

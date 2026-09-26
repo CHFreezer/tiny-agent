@@ -24,6 +24,7 @@ interface StreamEvent {
   usage?: { prompt: number; completion: number; total: number }
   contextTokens?: number
   lastPromptTokens?: number
+  lastCompletionTokens?: number
 }
 
 export function useChat(effort: string, onError: (message: string) => void) {
@@ -202,6 +203,7 @@ export function useChat(effort: string, onError: (message: string) => void) {
             if (m.usage) setLastUsage(m.usage)
             if (m.contextTokens !== undefined) setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, contextTokens: m.contextTokens } : s)))
             if (m.lastPromptTokens !== undefined) setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, lastPromptTokens: m.lastPromptTokens } : s)))
+            if (m.lastCompletionTokens !== undefined) setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, lastCompletionTokens: m.lastCompletionTokens } : s)))
             setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, generating: false } : s)))
             if (m.title) setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, title: m.title! } : s)))
             setGenId(null)
@@ -334,9 +336,9 @@ export function useChat(effort: string, onError: (message: string) => void) {
     if (cur == null) return false
     try {
       const r = await fetch(`/api/sessions/${cur}/usage`)
-      const d = (await r.json().catch(() => null)) as { promptTokens?: number } | null
+      const d = (await r.json().catch(() => null)) as { promptTokens?: number; completionTokens?: number } | null
       if (!d || d.promptTokens == null || d.promptTokens <= 0) return false
-      setSessions((x) => x.map((s) => (s.id === cur ? { ...s, lastPromptTokens: d.promptTokens } : s)))
+      setSessions((x) => x.map((s) => (s.id === cur ? { ...s, lastPromptTokens: d.promptTokens, lastCompletionTokens: d.completionTokens ?? 0 } : s)))
       return true
     } catch {
       // 服务器不可达：忽略

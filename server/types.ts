@@ -21,6 +21,7 @@ export interface Session {
   history: Entry[]
   createdAt: number
   lastPromptTokens?: number // 最近一次主请求的精确 prompt_tokens（上游分词器）
+  lastCompletionTokens?: number // 最近一次主请求响应的精确 completion_tokens（精确当前上下文 = 两者之和）
 }
 export interface McpServerConfig {
   name: string

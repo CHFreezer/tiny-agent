@@ -220,7 +220,7 @@ export function registerRoutes(app: express.Express): void {
       } catch (err) {
         w({ e: errMsg(err) })
       } finally {
-        w({ d: 1, title: s.title, history: s.history, contextTokens: contextTokens(s.history), lastPromptTokens: s.lastPromptTokens })
+        w({ d: 1, title: s.title, history: s.history, contextTokens: contextTokens(s.history), lastPromptTokens: s.lastPromptTokens, lastCompletionTokens: s.lastCompletionTokens })
         endAll(g)
         gens.delete(s.id)
       }
@@ -259,10 +259,11 @@ export function registerRoutes(app: express.Express): void {
       if (exact > 0) {
         await withLock(s.id, async () => {
           s.lastPromptTokens = exact
+          s.lastCompletionTokens = 0 // 探测响应不属于会话上下文
           saveSession(s)
         })
       }
-      res.json({ promptTokens: exact })
+      res.json({ promptTokens: exact, completionTokens: 0 })
     } catch (err) {
       const msg = errMsg(err)
       // 超窗 400：错误消息里带真实 prompt 长度——测量成功，且说明该压缩了
@@ -272,6 +273,7 @@ export function registerRoutes(app: express.Express): void {
         if (exact > 0) {
           await withLock(s.id, async () => {
             s.lastPromptTokens = exact
+            s.lastCompletionTokens = 0
             saveSession(s)
           })
         }
