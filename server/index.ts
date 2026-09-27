@@ -1,7 +1,4 @@
 import express from 'express'
-import fs from 'node:fs'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { closeAllMcp, sweepWorkspace, syncMcp } from './mcp.ts'
 import { loadAll } from './sessions.ts'
 import { registerRoutes } from './routes.ts'
@@ -13,18 +10,6 @@ const app = express()
 app.use(express.json({ limit: '20mb' })) // 图片 base64 可能较大
 registerRoutes(app)
 registerTts(app)
-
-// ===== 静态托管 =====
-const dist = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'client', 'dist')
-if (fs.existsSync(dist)) {
-  // index.html 禁缓存：rebuild 后 bundle hash 变，旧缓存 HTML 会引用不存在的 bundle → 白屏
-  // hashed 资源（JS/CSS 带内容 hash）文件名变即失效，express.static 默认按 ETag 重验证，安全
-  app.use(express.static(dist, { index: false }))
-  app.get(/.*/, (_req, res) => {
-    res.setHeader('Cache-Control', 'no-cache')
-    res.sendFile(path.join(dist, 'index.html'))
-  })
-}
 
 sweepWorkspace() // 启动时清扫工具工作区的过期文件
 loadAll()
