@@ -31,9 +31,6 @@ function migrateLegacySessions(): void {
 export const sessions = new Map<number, Session>()
 let currentId: number | null = null
 export const getCurrentId = () => currentId
-export const setCurrentId = (id: number | null) => {
-  currentId = id
-}
 
 export function loadAll(): void {
   migrateLegacySessions()

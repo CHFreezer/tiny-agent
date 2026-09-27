@@ -34,11 +34,9 @@ export function useChat(effort: string, onError: (message: string) => void) {
   const [busy, setBusy] = useState(false)
   const [compacting, setCompacting] = useState(false)
   const [status, setStatus] = useState('')
-  const [serverReady, setServerReady] = useState(false)
   // 流式 UI 状态：genId=当前生成索引所在条目（整轮常驻，a/x 事件移动，d 清除）；executingId=正在执行工具的条目
   const [genId, setGenId] = useState<string | null>(null)
   const [executingId, setExecutingId] = useState<string | null>(null)
-  const [lastUsage, setLastUsage] = useState<{ prompt: number; completion: number; total: number } | null>(null)
 
   const currentSessionIdRef = useRef(currentSessionId)
   currentSessionIdRef.current = currentSessionId
@@ -46,8 +44,6 @@ export function useChat(effort: string, onError: (message: string) => void) {
   sessionsRef.current = sessions
   const settingsRef = useRef(settings)
   settingsRef.current = settings
-  const serverReadyRef = useRef(serverReady)
-  serverReadyRef.current = serverReady
   const effortRef = useRef(effort)
   effortRef.current = effort
   const busyRef = useRef(false)
@@ -86,8 +82,6 @@ export function useChat(effort: string, onError: (message: string) => void) {
         setStatus('无法连接服务器')
         return
       }
-      setServerReady(true)
-      serverReadyRef.current = true
       const [sessData, settingsData] = data
       setSettings(settingsData)
       settingsRef.current = settingsData
@@ -202,7 +196,6 @@ export function useChat(effort: string, onError: (message: string) => void) {
           } else if (m.d) {
             // 结束：权威历史替换镜像（服务器与浏览器严格一致）
             if (m.history) setHistory(sessionId, m.history)
-            if (m.usage) setLastUsage(m.usage)
             if (m.contextTokens !== undefined) setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, contextTokens: m.contextTokens } : s)))
             if (m.lastPromptTokens !== undefined) setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, lastPromptTokens: m.lastPromptTokens } : s)))
             if (m.lastCompletionTokens !== undefined) setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, lastCompletionTokens: m.lastCompletionTokens } : s)))
@@ -487,7 +480,6 @@ export function useChat(effort: string, onError: (message: string) => void) {
     compacting,
     status,
     setStatus,
-    serverReady,
     history: sessions.find((s) => s.id === currentSessionId)?.history ?? [],
     sendMessage,
     stop,
@@ -495,7 +487,6 @@ export function useChat(effort: string, onError: (message: string) => void) {
     deleteEntry,
     deleteEntries,
     executingId,
-    lastUsage,
     retryEntry,
     compactContext,
     refreshUsage,
