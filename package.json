@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:vite\"",
+    "dev":"node scripts/dev.mjs",
     "dev:server": "node server/index.ts",
     "dev:vite": "vite --config client/vite.config.ts --port 5173",
     "build": "tsc -b client && tsc -p server --noEmit && vite --config client/vite.config.ts build",

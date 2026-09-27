@@ -50,7 +50,8 @@ npm run dev          # server(3000) + vite(5173)，vite 代理 /api → 3000
 服务器启动参数 `--data-dir <路径>` 显式指定数据目录，缺省 `./data`（相对进程 cwd）：
 
 ```bash
-npm run dev:server -- --data-dir <数据目录路径>
+npm run dev -- --data-dir <数据目录路径>         # 完整开发环境（server + vite）
+npm run dev:server -- --data-dir <数据目录路径>  # 仅 server
 ```
 
 数据目录内容：
@@ -81,7 +82,7 @@ npm run dev:server -- --data-dir <数据目录路径>
 
 | 脚本 | 说明 |
 |---|---|
-| `npm run dev` | server + vite 并行（开发） |
+| `npm run dev` | server + vite 并行（开发）（`-- --data-dir <路径>` 可传数据目录） |
 | `npm run dev:server` | 仅 server（`-- --data-dir <路径>` 可传数据目录） |
 | `npm run dev:vite` | 仅 vite |
 | `npm run build` | 类型检查 + vite 构建 → `client/dist/` |
