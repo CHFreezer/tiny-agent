@@ -7,6 +7,7 @@ import { McpDialog } from '@/components/McpDialog'
 import { MemoryDialog } from '@/components/MemoryDialog'
 import { SettingsDialog } from '@/components/SettingsDialog'
 import { Sidebar } from '@/components/Sidebar'
+import { Lightbox } from '@/components/Lightbox'
 import { useChat } from '@/hooks/useChat'
 import { fileToDataURL } from '@/lib/images'
 import { fetchMcp, fetchMemories, putMemories } from '@/lib/api'
@@ -242,6 +243,7 @@ export default function App() {
           lastCompletionTokens={chat.sessions.find((s) => s.id === chat.currentSessionId)?.lastCompletionTokens}
           maxContext={chat.settings.maxContext}
           busy={chat.busy}
+          compacting={chat.compacting}
           onToggleSidebar={() => setSidebarOpen((o) => !o)}
           onEffortChange={changeEffort}
           onOpenSettings={() => setSettingsOpen(true)}
@@ -308,6 +310,7 @@ export default function App() {
         onSave={memorySave}
         onDelete={memoryEditIndex == null ? undefined : memoryDelete}
       />
+      <Lightbox />
       <NotificationStack items={notifs} onDismiss={dismissNotif} />
     </div>
   )

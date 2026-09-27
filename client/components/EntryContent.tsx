@@ -3,6 +3,7 @@ import { ChevronRight } from 'lucide-react'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { cn } from '@/lib/utils'
+import { showLightbox } from '@/components/Lightbox'
 import type { Entry } from '@/lib/types'
 
 // breaks=true 时单换行也渲染为 <br>（user/工具结果/思考保留原始换行）
@@ -127,7 +128,7 @@ export function EntryContent({
       <>
         <CollapsibleText label="工具结果" text={content} error={isMcpError} selectMode={selectMode} />
         {entry.images?.map((url, i) => (
-          <img key={i} src={url} className="mt-1.5 block max-h-50 max-w-50 rounded-lg object-cover" alt="" />
+          <img key={i} src={url} className="mt-1.5 block max-h-50 max-w-50 rounded-lg object-cover cursor-zoom-in" alt="" onClick={() => showLightbox(url)} />
         ))}
       </>
     )
@@ -168,7 +169,7 @@ export function EntryContent({
         <div className="bubble-user prose prose-sm max-w-none" dangerouslySetInnerHTML={{ __html: renderMarkdown(entry.content, true) }} />
       )}
       {entry.images?.map((url, i) => (
-        <img key={i} src={url} className="mt-1.5 block max-h-50 max-w-50 rounded-lg object-cover" alt="" />
+        <img key={i} src={url} className="mt-1.5 block max-h-50 max-w-50 rounded-lg object-cover cursor-zoom-in" alt="" onClick={() => showLightbox(url)} />
       ))}
     </>
   )

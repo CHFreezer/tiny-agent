@@ -32,6 +32,7 @@ export function useChat(effort: string, onError: (message: string) => void) {
   const [currentSessionId, setCurrentSessionId] = useState<number | null>(null)
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS)
   const [busy, setBusy] = useState(false)
+  const [compacting, setCompacting] = useState(false)
   const [status, setStatus] = useState('')
   const [serverReady, setServerReady] = useState(false)
   // 流式 UI 状态：genId=当前生成索引所在条目（整轮常驻，a/x 事件移动，d 清除）；executingId=正在执行工具的条目
@@ -169,6 +170,7 @@ export function useChat(effort: string, onError: (message: string) => void) {
               const mpos = m.m.pos
               acc.set(mid, { full: '', think: '', tcs: [] })
               setGenId(mid)
+              setCompacting(true)
               setHistoryFn(sessionId, (h) => {
                 if (h.some((e) => e.id === mid)) return h
                 const next = [...h]
@@ -176,6 +178,7 @@ export function useChat(effort: string, onError: (message: string) => void) {
                 return next
               })
             } else {
+              setCompacting(false)
               patchEntry(sessionId, mid, m.m.ok ? {} : { summaryStatus: 'failed' })
             }
           } else if (m.x) {
@@ -207,6 +210,7 @@ export function useChat(effort: string, onError: (message: string) => void) {
             if (m.title) setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, title: m.title! } : s)))
             setGenId(null)
             setBusy(false)
+            setCompacting(false)
             busyRef.current = false
             if (errMsg) onErrorRef.current(errMsg.slice(0, 200))
             return
@@ -480,6 +484,7 @@ export function useChat(effort: string, onError: (message: string) => void) {
     settings,
     saveSettings,
     busy,
+    compacting,
     status,
     setStatus,
     serverReady,

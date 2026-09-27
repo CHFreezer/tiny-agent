@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
+import { showLightbox } from '@/components/Lightbox'
 
 export function Composer({
   busy,
@@ -37,7 +38,7 @@ export function Composer({
         <div className="flex flex-wrap gap-1.5">
           {images.map((url, i) => (
             <div key={i} className="relative">
-              <img src={url} className="h-16 w-16 rounded-lg object-cover border border-border" alt="" />
+              <img src={url} className="h-16 w-16 rounded-lg object-cover border border-border cursor-zoom-in" alt="" onClick={() => showLightbox(url)} />
               <button
                 type="button"
                 title="移除"

@@ -27,6 +27,7 @@ export function Header({
   lastCompletionTokens,
   maxContext,
   busy,
+  compacting,
   onToggleSidebar,
   onEffortChange,
   onOpenSettings,
@@ -39,6 +40,7 @@ export function Header({
   lastCompletionTokens?: number
   maxContext: number
   busy: boolean
+  compacting: boolean
   onToggleSidebar: () => void
   onEffortChange: (v: string) => void
   onOpenSettings: () => void
@@ -133,7 +135,7 @@ export function Header({
                 )}
               </div>
               <Button size="sm" variant="outline" className="w-full" disabled={busy || overflow} onClick={onCompact}>
-                {busy ? '压缩中…' : '压缩上下文'}
+                {compacting ? '压缩中…' : '压缩上下文'}
               </Button>
             </PopoverContent>
           </Popover>
