@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { execFile } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import OpenAI from 'openai'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { WORKSPACE_DIR, errMsg, readSettings } from './config.ts'
@@ -17,6 +17,7 @@ export const PWSH_TOOL: OpenAI.Chat.ChatCompletionTool = {
       type: 'object',
       properties: {
         command: { type: 'string', description: '要执行的 PowerShell 命令' },
+        timeoutSeconds: { type: 'number', description: '超时秒数，默认 30，最大 600' },
       },
       required: ['command'],
     },
@@ -44,29 +45,80 @@ export function currentTools(): OpenAI.Chat.ChatCompletionTool[] {
 
 // ===== 工具执行（服务器侧） =====
 // 只支持 PowerShell 7（pwsh.exe）：脚本正文作为单个 argv 元素交给 -Command，不做任何注入（照 opencode shell.ts:293）
-function runPwsh(command: string, signal: AbortSignal) {
+const PWSH_DEFAULT_TIMEOUT_S = 30
+const PWSH_MAX_TIMEOUT_S = 600
+const PWSH_MAX_CAPTURE_BYTES = 1024 * 1024 // 捕获窗口（滚动）：只留最新这么多字节，超出丢最旧的，不杀进程
+const PWSH_MAX_OUTPUT_CHARS = 10000 // 交给模型的字符上限（同样取最新的）
+function runPwsh(command: string, timeoutSeconds: number, signal: AbortSignal) {
   const { promise, resolve, reject } = Promise.withResolvers<{ exitCode: number; output: string }>()
   const preparedCommand =
     `try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}\n` +
     command
   const args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', preparedCommand]
-  execFile(
-    'pwsh.exe',
-    args,
-    { shell: false, timeout: 30000, maxBuffer: 1024 * 1024, windowsHide: true, cwd: WORKSPACE_DIR, env: { ...process.env, NO_COLOR: '1', TEMP: path.join(WORKSPACE_DIR, 'tmp'), TMP: path.join(WORKSPACE_DIR, 'tmp'), TMPDIR: path.join(WORKSPACE_DIR, 'tmp') }, signal },
-    (err, stdout, stderr) => {
-      if (signal.aborted) {
-        reject(err ?? new Error('aborted'))
-        return
+  const startedAt = Date.now()
+  const child = spawn('pwsh.exe', args, {
+    shell: false,
+    windowsHide: true,
+    cwd: WORKSPACE_DIR,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, NO_COLOR: '1', TEMP: path.join(WORKSPACE_DIR, 'tmp'), TMP: path.join(WORKSPACE_DIR, 'tmp'), TMPDIR: path.join(WORKSPACE_DIR, 'tmp') },
+  })
+  const stdoutSink = { chunks: [] as Buffer[], bytes: 0, dropped: 0 }
+  const stderrSink = { chunks: [] as Buffer[], bytes: 0, dropped: 0 }
+  const keepLatest = (sink: { chunks: Buffer[]; bytes: number; dropped: number }, chunk: Buffer) => {
+    sink.chunks.push(chunk)
+    sink.bytes += chunk.length
+    while (sink.bytes > PWSH_MAX_CAPTURE_BYTES) {
+      const head = sink.chunks[0]
+      const excess = sink.bytes - PWSH_MAX_CAPTURE_BYTES
+      if (head.length <= excess) {
+        sink.chunks.shift()
+        sink.bytes -= head.length
+        sink.dropped += head.length
+      } else {
+        sink.chunks[0] = head.subarray(excess)
+        sink.bytes -= excess
+        sink.dropped += excess
       }
-      const parts: string[] = []
-      if (stdout?.trim()) parts.push(stdout.trim())
-      if (stderr?.trim()) parts.push(stderr.trim())
-      // 进程已正常退出但无输出 → (无输出)，别把整条命令行回显给模型；只有启动失败（ENOENT 等，err.code 是字符串）才用 err.message
-      const output = parts.join('\n').replace(/\x1b\[[0-9;]*[A-Za-z]/g, '') || (err && typeof err.code !== 'number' ? String(err.message) : '(无输出)')
-      resolve({ exitCode: typeof err?.code === 'number' ? err.code : 0, output: output.slice(0, 8000) })
-    },
-  )
+    }
+  }
+  child.stdout.on('data', (chunk: Buffer) => keepLatest(stdoutSink, chunk))
+  child.stderr.on('data', (chunk: Buffer) => keepLatest(stderrSink, chunk))
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    child.kill()
+  }, timeoutSeconds * 1000)
+  const onAbort = () => child.kill()
+  signal.addEventListener('abort', onAbort, { once: true })
+  let settled = false
+  const finish = (exitCode: number, spawnError?: Error) => {
+    if (settled) return
+    settled = true
+    clearTimeout(timer)
+    signal.removeEventListener('abort', onAbort)
+    const parts: string[] = []
+    const out = Buffer.concat(stdoutSink.chunks).toString('utf8').trim()
+    const errOut = Buffer.concat(stderrSink.chunks).toString('utf8').trim()
+    if (out) parts.push(out)
+    if (errOut) parts.push(errOut)
+    // 进程正常结束但无输出 → (无输出)，别把整条命令行回显给模型；只有启动失败（ENOENT 等）才用 message
+    const text = parts.join('\n').replace(/\x1b\[[0-9;]*[A-Za-z]/g, '') || (spawnError ? String(spawnError.message) : '(无输出)')
+    // 两个窗口都是去头留尾：头部的信息缺失在正文前说明，被杀说明在正文后，三者都不参与窗口裁剪
+    const head: string[] = []
+    const rolled = stdoutSink.dropped + stderrSink.dropped
+    if (rolled > 0) head.push(`[截断] 前 ${rolled} 字节（捕获上限 ${PWSH_MAX_CAPTURE_BYTES / 1024 / 1024}MB）`)
+    if (text.length > PWSH_MAX_OUTPUT_CHARS) {
+      head.push(`[截断] 前 ${text.length - PWSH_MAX_OUTPUT_CHARS} 字符（显示上限 ${PWSH_MAX_OUTPUT_CHARS}）`)
+    }
+    const tail = timedOut ? [`[超时] 运行 ${((Date.now() - startedAt) / 1000).toFixed(1)}s（上限 ${timeoutSeconds}s）`] : []
+    resolve({ exitCode: timedOut ? 0 : exitCode, output: [...head, text.slice(-PWSH_MAX_OUTPUT_CHARS), ...tail].join('\n') })
+  }
+  child.on('error', (err) => finish(0, err))
+  child.on('close', (code) => {
+    if (signal.aborted) reject(new Error('aborted'))
+    else finish(code ?? 0)
+  })
   return promise
 }
 
@@ -91,7 +143,9 @@ export async function executeTool(tc: ToolCall, signal: AbortSignal): Promise<To
   if (tc.name === 'pwsh') {
     try {
       const args = tc.arguments ? (JSON.parse(tc.arguments) as Record<string, unknown>) : {}
-      const r = await runPwsh(String(args.command ?? ''), signal)
+      const requested = Math.floor(Number(args.timeoutSeconds))
+      const timeoutSeconds = Number.isFinite(requested) && requested > 0 ? Math.min(requested, PWSH_MAX_TIMEOUT_S) : PWSH_DEFAULT_TIMEOUT_S
+      const r = await runPwsh(String(args.command ?? ''), timeoutSeconds, signal)
       return { text: r.exitCode === 0 ? r.output : `[退出码 ${r.exitCode}]\n${r.output}` }
     } catch (err) {
       if (signal.aborted) throw err
