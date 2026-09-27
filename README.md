@@ -43,14 +43,14 @@ npm install
 npm run dev          # server(3000) + vite(5173)，vite 代理 /api → 3000
 ```
 
-打开 http://localhost:5173 ，在设置里填上游地址（如 `http://127.0.0.1:7528/v1`）和模型名。
+打开 http://localhost:5173 ，在设置里填上游地址（如 `http://<host>:<port>/v1`）和模型名。
 
 ### 数据目录
 
 服务器启动参数 `--data-dir <路径>` 显式指定数据目录，缺省 `./data`（相对进程 cwd）：
 
 ```bash
-npm run dev:server -- --data-dir D:/tiny-agent
+npm run dev:server -- --data-dir <数据目录路径>
 ```
 
 数据目录内容：
