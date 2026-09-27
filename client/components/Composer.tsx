@@ -36,7 +36,7 @@ export function Composer({
   }
 
   return (
-    <div className={cn('flex flex-col gap-2 rounded-xl', dragOver && 'outline-dashed outline-2 -outline-offset-2 outline-primary')}>
+    <div className="flex flex-col gap-2">
       {images.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
           {images.map((url, i) => (
@@ -56,7 +56,7 @@ export function Composer({
       )}
       <div className="flex gap-2 items-end">
         <Textarea
-          className="min-h-18 max-h-80 flex-1 resize-none bg-background"
+          className={cn('min-h-18 max-h-80 flex-1 resize-none bg-background', dragOver && 'outline-dashed outline-2 outline-primary')}
           rows={3}
           placeholder="输入消息，Enter 发送，Shift+Enter 换行；支持拖拽/粘贴图片"
           value={text}
