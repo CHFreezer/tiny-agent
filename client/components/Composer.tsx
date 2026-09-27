@@ -1,9 +1,11 @@
 import { useRef, useState } from 'react'
+import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { showLightbox } from '@/components/Lightbox'
 
 export function Composer({
+  dragOver,
   busy,
   images,
   onSend,
@@ -11,6 +13,7 @@ export function Composer({
   onAttach,
   onRemoveImage,
 }: {
+  dragOver: boolean
   busy: boolean
   images: string[]
   onSend: (text: string) => void
@@ -33,7 +36,7 @@ export function Composer({
   }
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className={cn('flex flex-col gap-2 rounded-xl', dragOver && 'outline-dashed outline-2 -outline-offset-2 outline-primary')}>
       {images.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
           {images.map((url, i) => (

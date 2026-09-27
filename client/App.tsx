@@ -11,7 +11,6 @@ import { Lightbox } from '@/components/Lightbox'
 import { useChat } from '@/hooks/useChat'
 import { fileToDataURL } from '@/lib/images'
 import { fetchMcp, fetchMemories, putMemories } from '@/lib/api'
-import { cn } from '@/lib/utils'
 import type { McpServerConfig, McpServerStatus } from '@/lib/types'
 
 export default function App() {
@@ -180,13 +179,14 @@ export default function App() {
 
   return (
     <div
-      className={cn('h-dvh flex', dragOver && 'outline-dashed outline-2 -outline-offset-8 outline-primary')}
+      className="h-dvh flex"
       onDragOver={(e) => {
         e.preventDefault()
         setDragOver(true)
       }}
       onDragLeave={(e) => {
-        if (e.currentTarget === e.target) setDragOver(false)
+        // 只有真正离开根元素（relatedTarget 不在其内，含 null=离开窗口）才清除；移到子元素上不清
+        if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false)
       }}
       onDrop={(e) => {
         e.preventDefault()
@@ -273,6 +273,7 @@ export default function App() {
             <div className="px-4 pb-4">
               <div className="pointer-events-auto mx-auto w-full max-w-3xl">
                 <Composer
+                  dragOver={dragOver}
                   busy={chat.busy}
                   images={pendingImages}
                   onSend={send}
