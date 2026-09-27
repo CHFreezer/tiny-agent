@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { execFile, execSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import OpenAI from 'openai'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { WORKSPACE_DIR, errMsg, readSettings } from './config.ts'
@@ -43,22 +43,17 @@ export function currentTools(): OpenAI.Chat.ChatCompletionTool[] {
 }
 
 // ===== 工具执行（服务器侧） =====
-// PowerShell 可执行文件：优先 pwsh（PowerShell 7），回退 powershell（Windows PowerShell）
-let PS_BIN = 'powershell'
-try {
-  execSync('where pwsh', { windowsHide: true, stdio: 'ignore' })
-  PS_BIN = 'pwsh'
-} catch {
-  // 未安装 pwsh
-}
-
+// 只支持 PowerShell 7（pwsh.exe）：脚本正文作为单个 argv 元素交给 -Command，不做任何注入（照 opencode shell.ts:293）
 function runPwsh(command: string, signal: AbortSignal) {
   const { promise, resolve, reject } = Promise.withResolvers<{ exitCode: number; output: string }>()
-  const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+  const preparedCommand =
+    `try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}\n` +
+    command
+  const args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', preparedCommand]
   execFile(
-    PS_BIN,
-    ['-NoProfile', '-NonInteractive', '-Command', `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8; ${command}`],
-    { timeout: 30000, maxBuffer: 1024 * 1024, windowsHide: true, cwd: WORKSPACE_DIR, env: { ...process.env, NO_COLOR: '1', TEMP: path.join(WORKSPACE_DIR, 'tmp'), TMP: path.join(WORKSPACE_DIR, 'tmp'), TMPDIR: path.join(WORKSPACE_DIR, 'tmp') }, signal },
+    'pwsh.exe',
+    args,
+    { shell: false, timeout: 30000, maxBuffer: 1024 * 1024, windowsHide: true, cwd: WORKSPACE_DIR, env: { ...process.env, NO_COLOR: '1', TEMP: path.join(WORKSPACE_DIR, 'tmp'), TMP: path.join(WORKSPACE_DIR, 'tmp'), TMPDIR: path.join(WORKSPACE_DIR, 'tmp') }, signal },
     (err, stdout, stderr) => {
       if (signal.aborted) {
         reject(err ?? new Error('aborted'))
@@ -67,7 +62,8 @@ function runPwsh(command: string, signal: AbortSignal) {
       const parts: string[] = []
       if (stdout?.trim()) parts.push(stdout.trim())
       if (stderr?.trim()) parts.push(stderr.trim())
-      const output = stripAnsi(parts.join('\n')) || (err ? String(err.message) : '(无输出)')
+      // 进程已正常退出但无输出 → (无输出)，别把整条命令行回显给模型；只有启动失败（ENOENT 等，err.code 是字符串）才用 err.message
+      const output = parts.join('\n').replace(/\x1b\[[0-9;]*[A-Za-z]/g, '') || (err && typeof err.code !== 'number' ? String(err.message) : '(无输出)')
       resolve({ exitCode: typeof err?.code === 'number' ? err.code : 0, output: output.slice(0, 8000) })
     },
   )
@@ -96,7 +92,7 @@ export async function executeTool(tc: ToolCall, signal: AbortSignal): Promise<To
     try {
       const args = tc.arguments ? (JSON.parse(tc.arguments) as Record<string, unknown>) : {}
       const r = await runPwsh(String(args.command ?? ''), signal)
-      return { text: r.output }
+      return { text: r.exitCode === 0 ? r.output : `[退出码 ${r.exitCode}]\n${r.output}` }
     } catch (err) {
       if (signal.aborted) throw err
       return { text: `工具执行失败: ${errMsg(err)}` }
