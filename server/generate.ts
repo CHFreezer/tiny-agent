@@ -86,16 +86,18 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
           gotFirstChunk = true
           armStall()
           if (opts.signal.aborted) break
-        const delta = chunk.choices?.[0]?.delta as (OpenAI.Chat.ChatCompletionChunk.Choice.Delta & { reasoning_content?: string }) | undefined
+        const delta = chunk.choices?.[0]?.delta as (OpenAI.Chat.ChatCompletionChunk.Choice.Delta & { reasoning_content?: string; reasoning?: string }) | undefined
         if (!delta) continue
-        if (delta.content != null || delta.reasoning_content != null || (delta.tool_calls?.length)) dropStale()
+        // 思考字段兼容：本地 llama.cpp 回 reasoning_content，commandcode 网关回 reasoning
+        const thinkDelta = delta.reasoning_content ?? delta.reasoning
+        if (delta.content != null || thinkDelta != null || (delta.tool_calls?.length)) dropStale()
         if (delta.content != null) {
           full += delta.content
           w({ id: entry.id, c: delta.content })
         }
-        if (delta.reasoning_content != null) {
-          think += delta.reasoning_content
-          w({ id: entry.id, r: delta.reasoning_content })
+        if (thinkDelta != null) {
+          think += thinkDelta
+          w({ id: entry.id, r: thinkDelta })
         }
         for (const tc of delta.tool_calls ?? []) {
           const i = tc.index ?? 0

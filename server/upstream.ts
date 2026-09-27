@@ -63,9 +63,12 @@ export function toApiMessages(history: Entry[]) {
           function: { name: tc.name, arguments: tc.arguments },
         })),
       }
-      // reasoning_content 回喂：让模型看到上一轮推理过程（思考连续性）；
-      // 历史条目一旦生成即稳定，前缀一致不破坏 prompt cache；不认该字段的服务器忽略
-      if (m.reasoning) e.reasoning_content = m.reasoning
+      // 思考回喂：本地 llama.cpp 认 reasoning_content，commandcode 网关认 reasoning，两个字段都带；
+      // 历史条目一旦生成即稳定，前缀一致不破坏 prompt cache；都不认的服务器忽略（实测网关回喂不计入 prompt）
+      if (m.reasoning) {
+        e.reasoning_content = m.reasoning
+        e.reasoning = m.reasoning
+      }
       return [e]
     }
     if (m.role === 'tool') {
@@ -79,7 +82,7 @@ export function toApiMessages(history: Entry[]) {
       return out
     }
     if (m.role === 'assistant' && m.reasoning) {
-      return [{ role: 'assistant', content: m.content, reasoning_content: m.reasoning }]
+      return [{ role: 'assistant', content: m.content, reasoning_content: m.reasoning, reasoning: m.reasoning }]
     }
     if (m.role === 'user' && m.images?.length) {
       const content: Array<Record<string, unknown>> = []
@@ -142,6 +145,9 @@ export function buildChatRequest(opts: {
   tools?: OpenAI.Chat.ChatCompletionTool[]
   max_tokens?: number
   reasoning_effort?: OpenAI.ReasoningEffort
+  reasoning?: { effort: string }
+  thinking?: { type: string }
+  chat_template_kwargs?: { enable_thinking?: boolean; reasoning_effort?: string }
 } {
   const s = readSettings()
   const allTools = currentTools()
@@ -157,6 +163,11 @@ export function buildChatRequest(opts: {
     stream_options: { include_usage: true },
     ...(allTools.length ? { tools: allTools } : {}),
     ...(s.maxTokens > 0 ? { max_tokens: s.maxTokens } : {}),
-    ...(s.effort ? { reasoning_effort: s.effort as OpenAI.ReasoningEffort } : {}),
+    // effort：各家认的字段不同，多个一起发（不认的忽略）；reasoning_effort 是少数会做枚举校验的字段（commandcode 只认 low|medium|high|xhigh|max，传别的值 400，错误原样透给前端）
+    ...(s.effort === 'none'
+      ? { reasoning_effort: 'none' as OpenAI.ReasoningEffort, reasoning: { effort: 'none' }, thinking: { type: 'disabled' }, chat_template_kwargs: { enable_thinking: false } }
+      : s.effort
+        ? { reasoning_effort: s.effort as OpenAI.ReasoningEffort, reasoning: { effort: s.effort }, chat_template_kwargs: { reasoning_effort: s.effort } }
+        : {}),
   }
 }

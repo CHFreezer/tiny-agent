@@ -12,12 +12,12 @@ export const PWSH_TOOL: OpenAI.Chat.ChatCompletionTool = {
   type: 'function',
   function: {
     name: 'pwsh',
-    description: `在本地机器上执行 PowerShell 命令并返回输出，可用于系统查询、文件操作等。工作目录：${WORKSPACE_DIR}（相对路径文件操作落在这里）`,
+    description: `在本地机器上执行 PowerShell 7（pwsh.exe）命令并返回输出，可用于系统查询、文件操作等。工作目录：${WORKSPACE_DIR}（相对路径文件操作落在这里）`,
     parameters: {
       type: 'object',
       properties: {
         command: { type: 'string', description: '要执行的 PowerShell 命令' },
-        timeoutSeconds: { type: 'number', description: '超时秒数，默认 30，最大 600' },
+        timeout: { type: 'number', description: '超时秒数，默认 30，最大 600' },
       },
       required: ['command'],
     },
@@ -27,7 +27,7 @@ export const READ_IMAGE_TOOL: OpenAI.Chat.ChatCompletionTool = {
   type: 'function',
   function: {
     name: 'read_image',
-    description: `读取本机图片文件（png/jpg/webp/gif）并让模型看到图片内容。配合 playwright 截图使用：截图保存到磁盘后，用此工具读取截图路径。工作目录：${WORKSPACE_DIR}`,
+    description: `读取本机图片文件（png/jpg/webp/gif）并让模型看到图片内容（例如其他工具或脚本截图落盘后的文件）。工作目录：${WORKSPACE_DIR}`,
     parameters: {
       type: 'object',
       properties: {
@@ -143,7 +143,7 @@ export async function executeTool(tc: ToolCall, signal: AbortSignal): Promise<To
   if (tc.name === 'pwsh') {
     try {
       const args = tc.arguments ? (JSON.parse(tc.arguments) as Record<string, unknown>) : {}
-      const requested = Math.floor(Number(args.timeoutSeconds))
+      const requested = Math.floor(Number(args.timeout))
       const timeoutSeconds = Number.isFinite(requested) && requested > 0 ? Math.min(requested, PWSH_MAX_TIMEOUT_S) : PWSH_DEFAULT_TIMEOUT_S
       const r = await runPwsh(String(args.command ?? ''), timeoutSeconds, signal)
       return { text: r.exitCode === 0 ? r.output : `[退出码 ${r.exitCode}]\n${r.output}` }
