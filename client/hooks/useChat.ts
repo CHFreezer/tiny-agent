@@ -22,7 +22,6 @@ interface StreamEvent {
   title?: string
   history?: Entry[]
   usage?: { prompt: number; completion: number; total: number }
-  contextTokens?: number
   lastPromptTokens?: number
   lastCompletionTokens?: number
 }

@@ -37,7 +37,7 @@ export const READ_IMAGE_TOOL: OpenAI.Chat.ChatCompletionTool = {
   },
 }
 
-// 当前工具集（与生成请求同源）：生成循环与上下文估算共用
+// 当前工具集（与生成请求同源）：生成循环与压缩请求共用
 export function currentTools(): OpenAI.Chat.ChatCompletionTool[] {
   return [...(readSettings().pwsh ? [PWSH_TOOL] : []), READ_IMAGE_TOOL, ...mcpTools()]
 }

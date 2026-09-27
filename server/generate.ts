@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import OpenAI from 'openai'
 import { errMsg, readSettings } from './config.ts'
 import { sessions, saveSession } from './sessions.ts'
-import { buildChatRequest, contextTokens, getOpenAI } from './upstream.ts'
+import { buildChatRequest, getOpenAI } from './upstream.ts'
 import { executeTool } from './tools.ts'
 import { addUsage, compactContext } from './compact.ts'
 import type { Entry, Session, ToolCall, Usage } from './types.ts'
@@ -56,14 +56,10 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
       saveSession(session)
       w({ h: session.history })
     }
-    if (s.maxContext > 0) {
-      // 上下文本身已超窗（如删除压缩气泡后恢复）：直接报错，不尝试自动压缩
-      // 有精确基准用基准，首轮（尚无 usage）用估算
-      const used = roundBase > 0 ? roundBase : contextTokens(session.history.filter((e) => e.id !== entry.id), session.createdAt)
-      if (used > s.maxContext) {
-        failed = `当前上下文约 ${used} token，已超过模型窗口（${s.maxContext}），无法自动压缩，请手动删除部分消息后继续`
-        break
-      }
+    if (s.maxContext > 0 && roundBase > 0 && roundBase > s.maxContext) {
+      // 上下文本身已超窗（如删除压缩气泡后恢复）：直接报错，不尝试自动压缩（只用上游精确值，不估算）
+      failed = `当前上下文 ${roundBase} token，已超过模型窗口（${s.maxContext}），无法自动压缩，请手动删除部分消息后继续`
+      break
     }
     // 上游停滞保护：生成阶段 120 秒无输出即中止（上游卡死会把会话永久锁在生成中）；
     // prefill 阶段（首 chunk 前）放宽到 600 秒——大上下文 prefill 可达数分钟（~1000 tps × 20 万 token ≈ 200s）
@@ -121,7 +117,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
         }
         addUsage(usage, chunk.usage)
       }
-      roundBase = usage.prompt - baseBefore // 本次请求的精确 prompt token 数（上游不支持 usage 时为 0 → 回退全量估算）
+      roundBase = usage.prompt - baseBefore // 本次请求的精确 prompt token 数（上游不支持 usage 时为 0）
       lastCompletion = usage.completion - completionBefore
       if (roundBase > 0) {
         // 流中途停止时 usage 未到达（roundBase=0）：保留上次的精确值，不覆盖
@@ -140,7 +136,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
         w({ d: 1, title: session.title, history: session.history, lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens })
         return
       }
-      // 超窗保护：上游 400 prompt 过长 → 压缩一次并重试本轮（覆盖估算残差；压缩自身失败则走 failed）
+      // 超窗保护：上游 400 prompt 过长 → 压缩一次并重试本轮（压缩自身失败则走 failed）
       if (!overflowRetried && s.maxContext > 0 && /exceeds|prompt length|context length|too long/i.test(errMsg(err))) {
         overflowRetried = true
         await compactContext(session, w, opts.signal, usage)
