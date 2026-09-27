@@ -5,7 +5,7 @@ import OpenAI from 'openai'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import type { Tool as McpTool } from '@modelcontextprotocol/sdk/types.js'
-import { DATA_DIR, WORKSPACE_DIR, errMsg, readSettings } from './config.ts'
+import { WORKSPACE_DIR, errMsg, readSettings } from './config.ts'
 import type { McpServerConfig } from './types.ts'
 
 // ===== MCP（官方 SDK，stdio 传输）：服务器持有连接，工具并入生成循环 =====
@@ -24,14 +24,9 @@ export interface McpEntry {
 const mcpServers = new Map<string, McpEntry>()
 export const mcpToolMap = new Map<string, { entry: McpEntry; tool: McpTool }>()
 
-// MCP 插件工作目录：插件的相对写入（截图/日志/临时文件）收拢到数据目录；TEMP 重定向到其 tmp/；启动时清扫过期文件
-const MCP_DATA_DIR = path.join(DATA_DIR, 'mcp')
+// MCP 插件工作目录：与内置工具（pwsh/read_image）共用 WORKSPACE_DIR，
+// 各工具产生的文件互相可见；TEMP 重定向到其 tmp/；启动时清扫过期文件
 const MCP_SWEEP_DAYS = 7
-function mcpWorkdir(name: string): string {
-  const d = path.join(MCP_DATA_DIR, mcpSanitize(name))
-  fs.mkdirSync(path.join(d, 'tmp'), { recursive: true })
-  return d
-}
 export function sweepWorkspace(): void {
   try {
     const cutoff = Date.now() - MCP_SWEEP_DAYS * 86400000
@@ -46,9 +41,7 @@ export function sweepWorkspace(): void {
         }
       }
     }
-    for (const dir of [WORKSPACE_DIR, MCP_DATA_DIR]) {
-      if (fs.existsSync(dir)) walk(dir)
-    }
+    if (fs.existsSync(WORKSPACE_DIR)) walk(WORKSPACE_DIR)
   } catch {
     // 清扫失败不影响启动
   }
@@ -175,12 +168,12 @@ export function syncMcp(): Promise<void> {
         const e: McpEntry = { cfg, tools: [], status: 'connecting' }
         mcpServers.set(cfg.name, e)
         try {
-          const workdir = mcpWorkdir(cfg.name)
+          const workdir = WORKSPACE_DIR
           const transport = new StdioClientTransport({
             command: cfg.command,
             args: splitArgs(cfg.args),
             cwd: workdir,
-            // TEMP 重定向到插件工作目录（用户配置的 env 可覆盖）
+            // TEMP 重定向到共享工作区（用户配置的 env 可覆盖）
             env: Object.fromEntries(Object.entries({ ...process.env, TEMP: path.join(workdir, 'tmp'), TMP: path.join(workdir, 'tmp'), TMPDIR: path.join(workdir, 'tmp'), ...parseEnv(cfg.env) }).filter((v): v is [string, string] => v[1] !== undefined)),
             stderr: 'pipe',
           })

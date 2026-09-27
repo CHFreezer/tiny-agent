@@ -60,8 +60,7 @@ npm run dev:server -- --data-dir D:/tiny-agent
 | `settings.json` | 上游地址、模型、MCP 配置、工具开关（UI 设置页写入） |
 | `sessions/` | 会话，每会话一个 JSON 文件 + `_index.json`（当前会话） |
 | `memories.json` | 持久记忆，每次生成注入 developer 角色 |
-| `workspace/` | pwsh 工具工作目录 + read_image 相对路径基准；内置工具 `%TEMP%` 重定向到其 `tmp/`（启动时清扫 7 天前文件） |
-| `mcp/<插件名>/` | MCP 插件工作目录（截图/日志/临时文件收拢于此，启动时清扫 7 天前文件） |
+| `workspace/` | 所有工具（pwsh / read_image / MCP 插件）共享工作目录，文件互相可见；`%TEMP%` 重定向到其 `tmp/`（启动时清扫 7 天前文件） |
 | `tts.wav` | TTS 缓存（同文本复用） |
 | `crash.log` | 未捕获异常/未处理 rejection 日志 |
 
@@ -69,7 +68,7 @@ npm run dev:server -- --data-dir D:/tiny-agent
 
 - **pwsh**：在本地执行 PowerShell（设置页可开关）；工作目录 `data/workspace`；30s 超时、输出截断 8000 字符
 - **read_image**：读取本机图片（≤20MB）注入上下文；相对路径基于 `data/workspace`
-- **MCP 插件**：设置页配置 `command + args + env`，官方 `@modelcontextprotocol/sdk` stdio 传输；工作目录 `data/mcp/<插件名>`（TEMP 重定向到其 `tmp/`）；工具名加 `mcp__<插件>__` 前缀；20s 连接超时（首次 npx 拉包较慢）、30s 工具超时；服务器退出时按进程树清理（Windows `taskkill /T`）
+- **MCP 插件**：设置页配置 `command + args + env`，官方 `@modelcontextprotocol/sdk` stdio 传输；工作目录 `data/workspace`（与内置工具共享，TEMP 重定向到其 `tmp/`）；工具名加 `mcp__<插件>__` 前缀；20s 连接超时（首次 npx 拉包较慢）、30s 工具超时；服务器退出时按进程树清理（Windows `taskkill /T`）
 
 ## TTS
 
