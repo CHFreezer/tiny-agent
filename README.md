@@ -67,7 +67,7 @@ npm run dev:server -- --data-dir <数据目录路径>  # 仅 server
 
 ## 工具
 
-- **pwsh**：在本地执行 PowerShell **7**（`pwsh.exe`；设置页可开关，本机没装 pwsh 7 则调用直接失败）；工作目录 `data/workspace`。脚本正文作为单个 argv 交给 `pwsh -NoLogo -NoProfile -NonInteractive -Command`（不注入任何内容）；输出默认 30s 超时（模型可通过 `timeout` 参数请求，上限 600s）、捕获窗口 1MB 与显示上限 10000 字符均滚动保留末尾；非零退出码在输出首行标 `[退出码 N]`，截断标 `[截断]`，超时被杀标 `[超时]`
+- **pwsh**：在本地执行 PowerShell 7 命令（设置页可开关）；工作目录 `data/workspace`
 - **read_image**：读取本机图片（≤20MB）注入上下文；相对路径基于 `data/workspace`
 - **MCP 插件**：设置页配置 `command + args + env`，官方 `@modelcontextprotocol/sdk` stdio 传输；工作目录 `data/workspace`（与内置工具共享，TEMP 重定向到其 `tmp/`）；工具名加 `mcp__<插件>__` 前缀；20s 连接超时（首次 npx 拉包较慢）、30s 工具超时；服务器退出时按进程树清理（Windows `taskkill /T`）
 
