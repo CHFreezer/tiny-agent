@@ -21,7 +21,6 @@ export interface Session {
   title: string
   history: Entry[]
   createdAt?: number
-  contextTokens?: number // 服务器估算的当前上下文 token（含记忆注入/压缩分割点）
   lastPromptTokens?: number // 最近一次主请求的精确 prompt_tokens（上游分词器）
   lastCompletionTokens?: number // 最近一次主请求响应的精确 completion_tokens
   generating?: boolean // 该会话是否有进行中的生成（页面重开/切换时重新附加）

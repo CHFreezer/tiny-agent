@@ -196,7 +196,6 @@ export function useChat(effort: string, onError: (message: string) => void) {
           } else if (m.d) {
             // 结束：权威历史替换镜像（服务器与浏览器严格一致）
             if (m.history) setHistory(sessionId, m.history)
-            if (m.contextTokens !== undefined) setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, contextTokens: m.contextTokens } : s)))
             if (m.lastPromptTokens !== undefined) setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, lastPromptTokens: m.lastPromptTokens } : s)))
             if (m.lastCompletionTokens !== undefined) setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, lastCompletionTokens: m.lastCompletionTokens } : s)))
             setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, generating: false } : s)))
@@ -368,9 +367,8 @@ export function useChat(effort: string, onError: (message: string) => void) {
         body: JSON.stringify(patch),
       })
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-        .then(({ entry, contextTokens }: { entry: Entry; contextTokens?: number }) => {
+        .then(({ entry }: { entry: Entry }) => {
           patchEntry(cur, id, entry)
-          if (contextTokens !== undefined) setSessions((x) => x.map((s) => (s.id === cur ? { ...s, contextTokens } : s)))
         })
         .catch(() => setStatus('保存失败（服务器不可达？）'))
     },
@@ -387,9 +385,8 @@ export function useChat(effort: string, onError: (message: string) => void) {
         body: JSON.stringify({ ids }),
       })
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-        .then(({ history, contextTokens }: { history: Entry[]; contextTokens?: number }) => {
+        .then(({ history }: { history: Entry[] }) => {
           setHistory(cur, history)
-          if (contextTokens !== undefined) setSessions((x) => x.map((s) => (s.id === cur ? { ...s, contextTokens } : s)))
         })
         .catch(() => setStatus('保存失败（服务器不可达？）'))
     },

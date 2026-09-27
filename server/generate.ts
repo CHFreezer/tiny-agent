@@ -137,7 +137,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
         if (think) entry.reasoning = think
         if (!full && !think && !toolCalls.length) session.history.splice(session.history.indexOf(entry), 1)
         saveSession(session)
-        w({ d: 1, title: session.title, history: session.history, contextTokens: contextTokens(session.history, session.createdAt), lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens })
+        w({ d: 1, title: session.title, history: session.history, lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens })
         return
       }
       // 超窗保护：上游 400 prompt 过长 → 压缩一次并重试本轮（覆盖估算残差；压缩自身失败则走 failed）
@@ -197,11 +197,11 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
     pos = session.history.length
   }
   if (opts.signal.aborted) {
-    w({ d: 1, title: session.title, history: session.history, contextTokens: contextTokens(session.history, session.createdAt), lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens })
+    w({ d: 1, title: session.title, history: session.history, lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens })
     return
   }
   if (failed) w({ e: failed })
-  w({ d: 1, title: session.title, history: session.history, contextTokens: contextTokens(session.history, session.createdAt), lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens, ...(usage.total ? { usage } : {}) })
+  w({ d: 1, title: session.title, history: session.history, lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens, ...(usage.total ? { usage } : {}) })
   finish()
 }
 

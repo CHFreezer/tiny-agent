@@ -16,7 +16,7 @@ import {
   switchSession,
   withLock,
 } from './sessions.ts'
-import { contextTokens, getOpenAI, normalizeMessage, toApiMessages } from './upstream.ts'
+import { getOpenAI, normalizeMessage, toApiMessages } from './upstream.ts'
 import { mcpStatus, syncMcp } from './mcp.ts'
 import { compactContext } from './compact.ts'
 import { currentTools } from './tools.ts'
@@ -77,7 +77,7 @@ export function registerRoutes(app: express.Express): void {
 
   // ===== 会话指令 =====
   app.get('/api/sessions', (_req, res) => {
-    res.json({ sessions: listSorted().map((s) => ({ ...s, contextTokens: contextTokens(s.history, s.createdAt), generating: gens.has(s.id) })), currentId: getCurrentId() })
+    res.json({ sessions: listSorted().map((s) => ({ ...s, generating: gens.has(s.id) })), currentId: getCurrentId() })
   })
 
   app.post('/api/sessions', (_req, res) => {
@@ -188,7 +188,7 @@ export function registerRoutes(app: express.Express): void {
     const g = gens.get(s.id)
     if (!g) {
       ndjsonHeaders(res)
-      res.write(JSON.stringify({ d: 1, title: s.title, history: s.history, contextTokens: contextTokens(s.history, s.createdAt) }) + '\n')
+      res.write(JSON.stringify({ d: 1, title: s.title, history: s.history }) + '\n')
       res.end()
       return
     }
@@ -220,7 +220,7 @@ export function registerRoutes(app: express.Express): void {
       } catch (err) {
         w({ e: errMsg(err) })
       } finally {
-        w({ d: 1, title: s.title, history: s.history, contextTokens: contextTokens(s.history, s.createdAt), lastPromptTokens: s.lastPromptTokens, lastCompletionTokens: s.lastCompletionTokens })
+        w({ d: 1, title: s.title, history: s.history, lastPromptTokens: s.lastPromptTokens, lastCompletionTokens: s.lastCompletionTokens })
         endAll(g)
         gens.delete(s.id)
       }
@@ -298,7 +298,7 @@ export function registerRoutes(app: express.Express): void {
       if (reasoning !== undefined) entry.reasoning = reasoning || undefined
       if (tool_calls !== undefined) entry.tool_calls = tool_calls
       saveSession(s)
-      res.json({ entry, contextTokens: contextTokens(s.history, s.createdAt) })
+      res.json({ entry })
     })
   })
 
@@ -311,7 +311,7 @@ export function registerRoutes(app: express.Express): void {
       const remaining = applyDelete(s, [req.params.eid])
       if (!remaining) return res.status(400).json({ error: '删除后会话将以助手回复开头，无法继续对话' })
       saveSession(s)
-      res.json({ history: remaining, contextTokens: contextTokens(remaining, s.createdAt) })
+      res.json({ history: remaining })
     })
   })
 
@@ -326,7 +326,7 @@ export function registerRoutes(app: express.Express): void {
       const remaining = applyDelete(s, ids)
       if (!remaining) return res.status(400).json({ error: '删除后会话将以助手回复开头，无法继续对话' })
       saveSession(s)
-      res.json({ history: remaining, contextTokens: contextTokens(remaining, s.createdAt) })
+      res.json({ history: remaining })
     })
   })
 
