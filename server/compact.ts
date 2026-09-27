@@ -85,7 +85,6 @@ export async function compactContext(session: Session, w: (o: unknown) => void, 
       }
       if (choice?.finish_reason) finish = choice.finish_reason
       addUsage(usage, chunk.usage)
-      if (chunk.usage) console.log('[compact] usage:', JSON.stringify(chunk.usage))
     }
   } catch (err) {
     if (!signal.aborted) streamErr = errMsg(err)

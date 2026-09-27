@@ -1,6 +1,6 @@
 # tiny-agent
 
-本地单服务器聊天助手：React 前端 + Express 服务器，对接任意 OpenAI 兼容上游（如 tabbyAPI / llama.cpp server），支持 MCP 插件扩展工具、本地 TTS 朗读。
+本地聊天助手：React 前端 + Express API 服务器，对接任意 OpenAI 兼容上游（如 tabbyAPI / llama.cpp server），支持 MCP 插件扩展工具、本地 TTS 朗读。
 
 > **项目状态**：当前为进行中项目，不是可发布的成熟产品；在目标机器上无法运行属于预期情况。
 
@@ -85,15 +85,15 @@ npm run dev:server -- --data-dir D:/tiny-agent
 | `npm run dev:server` | 仅 server（`-- --data-dir <路径>` 可传数据目录） |
 | `npm run dev:vite` | 仅 vite |
 | `npm run build` | 类型检查 + vite 构建 → `client/dist/` |
-| `npm start` | 生产模式：server 托管 `client/dist/` + API，单端口 3000 |
+| `npm start` | 生产模式：仅 API 服务器（端口 3000）；前端静态资产（`client/dist/`）由 nginx/CDN 托管 |
 
 ## 独立运行
 
 > 注意：当前非成熟产品，此流程仅在本机验证过；目标机器上无法运行属于预期情况。
 
 ```bash
-npm run build
-npm start            # 或 npm start -- --data-dir <路径>
+npm run build        # 产出 client/dist/（生产静态前端）
+npm start            # 仅 API 服务器（端口 3000）；或 npm start -- --data-dir <路径>
 ```
 
-浏览器直接访问 http://localhost:3000 ，数据落在 `--data-dir` 指定位置（缺省 `./data`）。
+`client/dist/` 是生产静态前端，由 nginx/CDN 等托管；前端 `/api` 请求指向 Node API 服务器（3000）。数据落在 `--data-dir` 指定位置（缺省 `./data`）。

@@ -119,7 +119,6 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
           w({ id: entry.id, t: o })
         }
         addUsage(usage, chunk.usage)
-        if (chunk.usage) console.log('[main] usage:', JSON.stringify(chunk.usage))
       }
       roundBase = usage.prompt - baseBefore // 本次请求的精确 prompt token 数（上游不支持 usage 时为 0 → 回退全量估算）
       lastCompletion = usage.completion - completionBefore
