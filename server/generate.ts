@@ -32,7 +32,6 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
   let failed: string | null = null
   let done = false
   const usage: Usage = { prompt: 0, completion: 0, total: 0 }
-  let overflowRetried = false // 超窗 400 的自动压缩重试：整个生成过程最多一次（每轮重置会无限循环）
   let roundBase = 0 // 最近一次主请求的精确 prompt_tokens（上游分词器，usage 末尾 chunk）
   let lastCompletion = 0 // 最近一次主请求响应的精确 completion_tokens
   for (let round = 0; !failed && !done; round++) {
@@ -55,11 +54,6 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
       session.history.splice(from)
       saveSession(session)
       w({ h: session.history })
-    }
-    if (s.maxContext > 0 && roundBase > 0 && roundBase > s.maxContext) {
-      // 上下文本身已超窗（如删除压缩气泡后恢复）：直接报错，不尝试自动压缩（只用上游精确值，不估算）
-      failed = `当前上下文 ${roundBase} token，已超过模型窗口（${s.maxContext}），无法自动压缩，请手动删除部分消息后继续`
-      break
     }
     // 上游停滞保护：生成阶段 120 秒无输出即中止（上游卡死会把会话永久锁在生成中）；
     // prefill 阶段（首 chunk 前）放宽到 600 秒——大上下文 prefill 可达数分钟（~1000 tps × 20 万 token ≈ 200s）
@@ -136,14 +130,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
         w({ d: 1, title: session.title, history: session.history, lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens })
         return
       }
-      // 超窗保护：上游 400 prompt 过长 → 压缩一次并重试本轮（压缩自身失败则走 failed）
-      if (!overflowRetried && s.maxContext > 0 && /exceeds|prompt length|context length|too long/i.test(errMsg(err))) {
-        overflowRetried = true
-        await compactContext(session, w, opts.signal, usage)
-        continue
-      }
       failed = stalled ? '上游生成停滞（120 秒无输出），已中止' : errMsg(err)
-      if (overflowRetried && !stalled) failed += '（已尝试自动压缩，上下文仍超窗，请手动删除部分消息后继续）'
     } finally {
       clearTimeout(stallTimer)
       opts.signal.removeEventListener('abort', onUserAbort)
