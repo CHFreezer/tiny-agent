@@ -62,5 +62,5 @@ export const DEFAULT_SETTINGS: Settings = {
   mcp: [],
   maxContext: 0,
   maxTokens: 0,
-  pwsh: true,
+  pwsh: false,
 }

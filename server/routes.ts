@@ -56,7 +56,7 @@ export function registerRoutes(app: express.Express): void {
     const maxTokens = toPosInt(body.maxTokens)
     try {
       fs.mkdirSync(DATA_DIR, { recursive: true })
-      fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ baseUrl, mode, model, effort, apiKey, mcp, maxContext, maxTokens, pwsh: body.pwsh !== false }))
+      fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ baseUrl, mode, model, effort, apiKey, mcp, maxContext, maxTokens, pwsh: body.pwsh === true }))
       void syncMcp() // 配置变更 → 对齐 MCP 连接（后台，不阻塞响应）
       res.json({ ok: true })
     } catch (err) {

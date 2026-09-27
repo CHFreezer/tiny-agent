@@ -39,13 +39,13 @@ process.on('unhandledRejection', (reason) => {
 })
 
 export function readSettings(): Settings {
-  const def: Settings = { baseUrl: '', mode: 'openai', model: '', effort: '', apiKey: '', mcp: [], maxContext: 0, maxTokens: 0, pwsh: true }
+  const def: Settings = { baseUrl: '', mode: 'openai', model: '', effort: '', apiKey: '', mcp: [], maxContext: 0, maxTokens: 0, pwsh: false }
   try {
     const s = { ...def, ...(JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) as Partial<Settings>) }
     s.mcp = (Array.isArray(s.mcp) ? s.mcp : [])
       .filter((c): c is McpServerConfig => !!c && typeof c.name === 'string' && typeof c.command === 'string')
       .map((c) => ({ ...c, enabled: c.enabled !== false }))
-    s.pwsh = s.pwsh !== false
+    s.pwsh = s.pwsh === true // 默认关闭：只有显式 true 才启用
     return s
   } catch {
     return def
