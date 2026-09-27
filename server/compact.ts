@@ -73,6 +73,7 @@ export async function compactContext(session: Session, w: (o: unknown) => void, 
       buildChatRequest({
         history: session.history.filter((e) => e.id !== entry.id),
         extra: [{ role: 'user', content: SUMMARY_PROMPT }],
+        createdAt: session.createdAt,
       }),
       { signal },
     )

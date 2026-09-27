@@ -59,7 +59,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
     if (s.maxContext > 0) {
       // 上下文本身已超窗（如删除压缩气泡后恢复）：直接报错，不尝试自动压缩
       // 有精确基准用基准，首轮（尚无 usage）用估算
-      const used = roundBase > 0 ? roundBase : contextTokens(session.history.filter((e) => e.id !== entry.id))
+      const used = roundBase > 0 ? roundBase : contextTokens(session.history.filter((e) => e.id !== entry.id), session.createdAt)
       if (used > s.maxContext) {
         failed = `当前上下文约 ${used} token，已超过模型窗口（${s.maxContext}），无法自动压缩，请手动删除部分消息后继续`
         break
@@ -87,6 +87,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
       const stream = await getOpenAI(s.baseUrl, s.apiKey).chat.completions.create(
         buildChatRequest({
           history: session.history.slice(0, pos),
+          createdAt: session.createdAt,
         }),
         { signal: stallCtl.signal },
       )
@@ -136,7 +137,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
         if (think) entry.reasoning = think
         if (!full && !think && !toolCalls.length) session.history.splice(session.history.indexOf(entry), 1)
         saveSession(session)
-        w({ d: 1, title: session.title, history: session.history, contextTokens: contextTokens(session.history), lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens })
+        w({ d: 1, title: session.title, history: session.history, contextTokens: contextTokens(session.history, session.createdAt), lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens })
         return
       }
       // 超窗保护：上游 400 prompt 过长 → 压缩一次并重试本轮（覆盖估算残差；压缩自身失败则走 failed）
@@ -196,11 +197,11 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
     pos = session.history.length
   }
   if (opts.signal.aborted) {
-    w({ d: 1, title: session.title, history: session.history, contextTokens: contextTokens(session.history), lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens })
+    w({ d: 1, title: session.title, history: session.history, contextTokens: contextTokens(session.history, session.createdAt), lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens })
     return
   }
   if (failed) w({ e: failed })
-  w({ d: 1, title: session.title, history: session.history, contextTokens: contextTokens(session.history), lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens, ...(usage.total ? { usage } : {}) })
+  w({ d: 1, title: session.title, history: session.history, contextTokens: contextTokens(session.history, session.createdAt), lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens, ...(usage.total ? { usage } : {}) })
   finish()
 }
 

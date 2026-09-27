@@ -110,6 +110,22 @@ export function toApiMessages(history: Entry[]) {
   return sanitizeToolCalls(msgs)
 }
 
+// 会话创建时间 → 可读时间（含时区偏移），供 developer 注入让模型知道"现在"
+const formatTime = (ts: number): string => {
+  const d = new Date(ts)
+  const p = (n: number) => String(n).padStart(2, '0')
+  const off = -d.getTimezoneOffset()
+  const sign = off >= 0 ? '+' : '-'
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} (UTC${sign}${p(Math.floor(Math.abs(off) / 60))}:${p(Math.abs(off) % 60)})`
+}
+// developer 注入内容：当前时间（会话创建时）+ 用户记忆。buildChatRequest 与 contextTokens 共用，保证请求与 token 计数一致
+const devContent = (createdAt: number): string => {
+  const parts = [`当前时间：${formatTime(createdAt)}`]
+  const memories = readMemories()
+  if (memories.length) parts.push(...memories)
+  return parts.join('\n')
+}
+
 // 构建发往 OpenAI SDK 的完整请求载荷——主请求与压缩请求共用此唯一实现。
 // 除 history（调用方切片/过滤）与 extra（压缩请求的摘要指令）外，所有字段
 // （model/tools/max_tokens/reasoning_effort/developer 注入）都从 settings 读取，
@@ -117,6 +133,7 @@ export function toApiMessages(history: Entry[]) {
 export function buildChatRequest(opts: {
   history: Entry[]
   extra?: Record<string, unknown>[]
+  createdAt: number
 }): {
   model: string
   messages: OpenAI.Chat.ChatCompletionMessageParam[]
@@ -129,12 +146,9 @@ export function buildChatRequest(opts: {
   const s = readSettings()
   const allTools = currentTools()
   let messages = toApiMessages(opts.history)
-  const memories = readMemories()
-  if (memories.length) {
-    const devMsg = { role: 'developer', content: memories.join('\n') }
-    const sysIdx = messages.findIndex((m) => m.role === 'system')
-    messages.splice(sysIdx >= 0 ? sysIdx + 1 : 0, 0, devMsg)
-  }
+  const devMsg = { role: 'developer', content: devContent(opts.createdAt) }
+  const sysIdx = messages.findIndex((m) => m.role === 'system')
+  messages.splice(sysIdx >= 0 ? sysIdx + 1 : 0, 0, devMsg)
   if (opts.extra?.length) messages = [...messages, ...opts.extra]
   return {
     model: s.model,
@@ -148,11 +162,8 @@ export function buildChatRequest(opts: {
 }
 
 // 当前实际将发送给模型的上下文 token 数（含 developer 记忆注入 + 工具定义 + 图片）
-export const contextTokens = (history: Entry[]) => {
-  const memories = readMemories()
-  const messages = memories.length
-    ? [{ role: 'developer', content: memories.join('\n') }, ...toApiMessages(history)]
-    : toApiMessages(history)
+export const contextTokens = (history: Entry[], createdAt: number) => {
+  const messages = [{ role: 'developer', content: devContent(createdAt) }, ...toApiMessages(history)]
   let n = messages.reduce((a, m) => a + messageTokens(m), 0)
   n += countTextTokens(JSON.stringify(currentTools())) // 工具定义：每次请求都带完整 schema
   return n
