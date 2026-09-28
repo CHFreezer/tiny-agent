@@ -1,4 +1,4 @@
-import { Pencil, Plus, SquareTerminal, Trash2 } from 'lucide-react'
+import { Loader2, Pencil, Plus, SquareTerminal, Trash2 } from 'lucide-react'
 import { useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
@@ -96,6 +96,7 @@ export function Sidebar({
                   />
                 ) : (
                   <>
+                    {s.generating && <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" aria-label="生成中" />}
                     <span className="flex-1 truncate">{s.title}</span>
                     <button
                       type="button"

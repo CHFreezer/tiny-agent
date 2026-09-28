@@ -32,6 +32,13 @@ function migrateLegacySessions(): void {
 export const sessions = new Map<number, Session>()
 let currentId: number | null = null
 export const getCurrentId = () => currentId
+// 会话 id 分配：单调递增，保证同一毫秒内连续创建（并发新建/多设备同时点）也不会撞 id
+let lastId = 0
+const nextId = () => {
+  const t = Date.now()
+  lastId = t > lastId ? t : lastId + 1
+  return lastId
+}
 
 export function loadAll(): void {
   migrateLegacySessions()
@@ -53,6 +60,8 @@ export function loadAll(): void {
   } catch {
     // 会话目录不存在
   }
+  // 重启后从既有 id 续起，避免复用（同毫秒内新建也不会撞）
+  lastId = Math.max(0, ...sessions.keys())
 }
 
 export function saveSession(s: Session): void {
@@ -68,7 +77,8 @@ function saveIndex(): void {
 }
 
 export function listSorted(): Session[] {
-  return [...sessions.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+  // 同毫秒创建的会话按 id 兜底排序，保证"最新在前"稳定
+  return [...sessions.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0) || b.id - a.id)
 }
 
 // 同一会话的任何变更（含在途生成）串行化
@@ -83,7 +93,7 @@ export function withLock<T>(id: number, fn: () => Promise<T>): Promise<T> {
 // ===== 会话操作 =====
 export function createSession(): Session {
   const s: Session = {
-    id: Date.now(),
+    id: nextId(),
     title: '新会话',
     history: [{ id: randomUUID(), role: 'system', content: 'You are a helpful assistant.', ts: Date.now() }],
     createdAt: Date.now(),
@@ -120,6 +130,7 @@ export function deleteSession(id: number): { sessions: Session[]; currentId: num
     // 文件不存在
   }
   removeImages(id)
+  locks.delete(id) // 会话已删：同会话串行锁的槽位一并回收
   if (currentId === id) {
     const rest = listSorted()
     currentId = rest.length ? rest[0].id : null

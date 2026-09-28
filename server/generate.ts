@@ -21,13 +21,16 @@ interface GenerateOpts {
   staleFrom?: number
 }
 
-export async function generate(session: Session, w: (o: unknown) => void, finish: () => void, opts: GenerateOpts): Promise<void> {
+// 返回值：本轮生成失败的原因（无失败/被用户停止 → null）。调用方据此把 err 放进 gen:false 广播，
+// 让"没在看这个会话"的设备也能收到失败通知。
+export async function generate(session: Session, w: (o: unknown) => void, finish: () => void, opts: GenerateOpts): Promise<string | null> {
   const s = readSettings()
   if (!s.baseUrl || !s.model) {
-    w({ e: '未配置服务器地址/模型，请先在"设置"中配置' })
+    const msg = '未配置服务器地址/模型，请先在"设置"中配置'
+    w({ e: msg })
     w({ d: 1, title: session.title, history: session.history })
     finish()
-    return
+    return msg
   }
   let pos = opts.insertPos
   let failed: string | null = null
@@ -131,7 +134,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
         if (!full && !think && !toolCalls.length) session.history.splice(session.history.indexOf(entry), 1)
         saveSession(session)
         w({ d: 1, title: session.title, history: session.history, lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens })
-        return
+        return null
       }
       failed = stalled ? '上游生成停滞（120 秒无输出），已中止' : errMsg(err)
     } finally {
@@ -184,11 +187,12 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
   }
   if (opts.signal.aborted) {
     w({ d: 1, title: session.title, history: session.history, lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens })
-    return
+    return null
   }
   if (failed) w({ e: failed })
   w({ d: 1, title: session.title, history: session.history, lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens, ...(usage.total ? { usage } : {}) })
   finish()
+  return failed
 }
 
 // ===== 生成与连接解耦：生成独立于任何 HTTP 连接运行 =====

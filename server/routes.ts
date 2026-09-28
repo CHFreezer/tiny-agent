@@ -34,10 +34,19 @@ const beginGen = (s: Session, res: express.Response): Gen => {
   attachClient(g, res)
   return g
 }
-const endGen = (s: Session, g: Gen): void => {
+const endGen = (s: Session, g: Gen, err?: string | null, stopped?: boolean): void => {
   endAll(g)
   gens.delete(s.id)
-  broadcast({ sid: s.id, gen: false, title: s.title, lastPromptTokens: s.lastPromptTokens, lastCompletionTokens: s.lastCompletionTokens })
+  // err/stopped 随 gen:false 广播：没在看这个会话的设备也能收到失败/停止通知
+  broadcast({
+    sid: s.id,
+    gen: false,
+    title: s.title,
+    lastPromptTokens: s.lastPromptTokens,
+    lastCompletionTokens: s.lastCompletionTokens,
+    ...(err ? { err } : {}),
+    ...(stopped ? { stopped: true } : {}),
+  })
 }
 
 export function registerRoutes(app: express.Express): void {
@@ -145,12 +154,14 @@ export function registerRoutes(app: express.Express): void {
       const g = beginGen(s, res) // 先广播 gen:true（含新标题），其他设备随即附加本会话流
       const w = makeW(g)
       w({ h: s.history })
+      let genErr: string | null = null
       try {
-        await generate(s, w, () => endAll(g), { insertPos: s.history.length, signal: g.controller.signal })
+        genErr = await generate(s, w, () => endAll(g), { insertPos: s.history.length, signal: g.controller.signal })
       } catch (err) {
-        w({ e: errMsg(err), d: 1, title: s.title, history: s.history })
+        genErr = errMsg(err)
+        w({ e: genErr, d: 1, title: s.title, history: s.history })
       } finally {
-        endGen(s, g)
+        endGen(s, g, genErr, g.controller.signal.aborted)
       }
     }).catch((err) => {
       try {
@@ -180,12 +191,14 @@ export function registerRoutes(app: express.Express): void {
       const g = beginGen(s, res)
       const w = makeW(g)
       w({ h: s.history })
+      let genErr: string | null = null
       try {
-        await generate(s, w, () => endAll(g), { insertPos, staleFrom, signal: g.controller.signal })
+        genErr = await generate(s, w, () => endAll(g), { insertPos, staleFrom, signal: g.controller.signal })
       } catch (err) {
-        w({ e: errMsg(err), d: 1, title: s.title, history: s.history })
+        genErr = errMsg(err)
+        w({ e: genErr, d: 1, title: s.title, history: s.history })
       } finally {
-        endGen(s, g)
+        endGen(s, g, genErr, g.controller.signal.aborted)
       }
     }).catch((err) => {
       try {
@@ -234,7 +247,7 @@ export function registerRoutes(app: express.Express): void {
         w({ e: errMsg(err) })
       } finally {
         w({ d: 1, title: s.title, history: s.history, lastPromptTokens: s.lastPromptTokens, lastCompletionTokens: s.lastCompletionTokens })
-        endGen(s, g)
+        endGen(s, g, null, g.controller.signal.aborted)
       }
     }).catch((err) => {
       try {

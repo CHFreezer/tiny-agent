@@ -92,7 +92,11 @@ export default function App() {
     const timers = notifTimers.current
     return () => timers.forEach((t) => clearTimeout(t))
   }, [])
-  const chat = useChat(effort, (msg) => pushNotif({ title: '请求失败', description: msg, variant: 'error' }))
+  const chat = useChat(
+    effort,
+    (msg) => pushNotif({ title: '请求失败', description: msg, variant: 'error' }),
+    (n) => pushNotif(n),
+  )
 
   // TTS 朗读：单实例，点按钮合成+播放，再点停止；切换会话自动停止
   const [ttsId, setTtsId] = useState<string | null>(null)

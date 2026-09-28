@@ -41,6 +41,8 @@ interface SyncEvent {
   currentId?: number | null
   sid?: number
   gen?: boolean // 某会话开始/结束生成
+  err?: string // 生成失败原因（随 gen:false 下发，没在看该会话的设备据此提示）
+  stopped?: boolean // 该轮是被显式停止的（与"正常完成"区分）
   title?: string
   lastPromptTokens?: number
   lastCompletionTokens?: number
@@ -48,16 +50,43 @@ interface SyncEvent {
   history?: Entry[] // 条目被其他设备删除
 }
 
-export function useChat(effort: string, onError: (message: string) => void) {
+// 单会话的视图态（生成索引气泡 / 工具执行中 / 压缩中）——按会话存，不再是一个全局值
+interface ViewState {
+  genId: string | null
+  executingId: string | null
+  compacting: boolean
+}
+const EMPTY_VIEW: ViewState = { genId: null, executingId: null, compacting: false }
+
+export interface ChatNotice {
+  title: string
+  description?: string
+  variant: 'info' | 'warning' | 'error'
+}
+
+export function useChat(effort: string, onError: (message: string) => void, onNotify: (n: ChatNotice) => void) {
   const [sessions, setSessions] = useState<Session[]>([])
   const [currentSessionId, setCurrentSessionId] = useState<number | null>(null)
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS)
-  const [busy, setBusy] = useState(false)
-  const [compacting, setCompacting] = useState(false)
   const [status, setStatus] = useState('')
-  // 流式 UI 状态：genId=当前生成索引所在条目（整轮常驻，a/x 事件移动，d 清除）；executingId=正在执行工具的条目
-  const [genId, setGenId] = useState<string | null>(null)
-  const [executingId, setExecutingId] = useState<string | null>(null)
+  // 每个会话各自的「视图态」：生成索引气泡 / 工具执行中 / 压缩中。
+  // 按会话隔离后，切走再切回、或同时跑多个会话，都不会互相串味。
+  const [viewStates, setViewStates] = useState<Map<number, ViewState>>(new Map())
+  const patchView = useCallback((sid: number, patch: Partial<ViewState>) => {
+    setViewStates((m) => {
+      const next = { ...(m.get(sid) ?? EMPTY_VIEW), ...patch }
+      const empty = !next.genId && !next.executingId && !next.compacting
+      if (empty) {
+        if (!m.has(sid)) return m
+        const c = new Map(m)
+        c.delete(sid)
+        return c
+      }
+      const c = new Map(m)
+      c.set(sid, next)
+      return c
+    })
+  }, [])
 
   const currentSessionIdRef = useRef(currentSessionId)
   currentSessionIdRef.current = currentSessionId
@@ -67,11 +96,19 @@ export function useChat(effort: string, onError: (message: string) => void) {
   settingsRef.current = settings
   const effortRef = useRef(effort)
   effortRef.current = effort
-  const busyRef = useRef(false)
-  const abortRef = useRef<AbortController | null>(null)
+  // 本设备持有的会话流：genStreams=本设备发起的生成流（POST 响应），attachStreams=为同步视图附加的流（GET）。
+  // 均按会话各一条；切换会话只动 attach，自己发起的生成流继续把增量写进它自己的镜像。
+  const genStreams = useRef(new Map<number, AbortController>())
+  const attachStreams = useRef(new Map<number, AbortController>())
+  const hasStream = (sid: number) => genStreams.current.has(sid) || attachStreams.current.has(sid)
+  const creatingRef = useRef(false) // 无会话时"先建会话再发送"的防重入
+  // 本设备发起过生成的会话（用于避免"自己发起 → 已弹过错误 → WS 再弹一次"的重复通知）
+  const ownGenSids = useRef(new Set<number>())
   const attachFnRef = useRef<((sid: number) => void) | null>(null)
   const onErrorRef = useRef(onError)
   onErrorRef.current = onError
+  const onNotifyRef = useRef(onNotify)
+  onNotifyRef.current = onNotify
 
   // ===== 镜像更新（服务器事实 → 视图状态） =====
   const setHistory = useCallback((id: number, history: Entry[]) => {
@@ -109,11 +146,8 @@ export function useChat(effort: string, onError: (message: string) => void) {
       setSessions(sessData.sessions || [])
       const cur = sessData.currentId ?? null
       setCurrentSessionId(cur)
-      // 当前会话正在生成（如页面重开）：置忙并重新附加，重放事件恢复实时视图
-      if (cur != null && (sessData.sessions || []).find((s) => s.id === cur)?.generating) {
-        setBusy(true)
-        busyRef.current = true
-      }
+      // 当前会话若正在生成（如页面重开），附加会话流即可：重放事件恢复实时视图；
+      // 忙态不再单独存，直接由镜像里的 generating 派生
       if (cur != null) void attachFnRef.current?.(cur)
     })()
     return () => {
@@ -152,7 +186,7 @@ export function useChat(effort: string, onError: (message: string) => void) {
             // 新 assistant 条目：按服务器绝对 pos 插入（常规 pos=历史末尾；重试 pos=中间原位插入）；镜像已有（重放场景）则不重复插入
             const aid = m.a
             acc.set(aid, { full: '', think: '', tcs: [] })
-            setGenId(aid) // 生成索引指示：本轮输出写往该条目，整轮常驻
+            patchView(sessionId, { genId: aid }) // 生成索引指示：本轮输出写往该条目，整轮常驻
             setHistoryFn(sessionId, (h) => {
               if (h.some((e) => e.id === aid)) return h
               if (m.pos === undefined) return [...h, { id: aid, role: 'assistant', content: '' }]
@@ -170,7 +204,7 @@ export function useChat(effort: string, onError: (message: string) => void) {
               a.think += m.r
             }
             if (m.t) {
-              setExecutingId(m.id)
+              patchView(sessionId, { executingId: m.id })
               const slot = a.tcs[m.t.i] ?? (a.tcs[m.t.i] = { id: '', name: '', arguments: '' })
               if (m.t.id) slot.id = m.t.id
               if (m.t.n) slot.name += m.t.n
@@ -184,8 +218,7 @@ export function useChat(effort: string, onError: (message: string) => void) {
             if (m.m.pos !== undefined) {
               const mpos = m.m.pos
               acc.set(mid, { full: '', think: '', tcs: [] })
-              setGenId(mid)
-              setCompacting(true)
+              patchView(sessionId, { genId: mid, compacting: true })
               setHistoryFn(sessionId, (h) => {
                 if (h.some((e) => e.id === mid)) return h
                 const next = [...h]
@@ -193,12 +226,11 @@ export function useChat(effort: string, onError: (message: string) => void) {
                 return next
               })
             } else {
-              setCompacting(false)
+              patchView(sessionId, { compacting: false })
               patchEntry(sessionId, mid, m.m.ok ? {} : { summaryStatus: 'failed' })
             }
           } else if (m.x) {
-            setExecutingId(null)
-            setGenId(m.x) // 工具执行期间，生成索引位于工具结果条目
+            patchView(sessionId, { executingId: null, genId: m.x }) // 工具执行期间，生成索引位于工具结果条目
             const xid = m.x
             if (m.r !== undefined) {
               patchEntry(sessionId, xid, { content: m.r, ...(m.imgs ? { images: m.imgs } : {}) })
@@ -221,10 +253,7 @@ export function useChat(effort: string, onError: (message: string) => void) {
             if (m.lastCompletionTokens !== undefined) setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, lastCompletionTokens: m.lastCompletionTokens } : s)))
             setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, generating: false } : s)))
             if (m.title) setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, title: m.title! } : s)))
-            setGenId(null)
-            setBusy(false)
-            setCompacting(false)
-            busyRef.current = false
+            patchView(sessionId, { genId: null, executingId: null, compacting: false })
             if (errMsg) onErrorRef.current(errMsg.slice(0, 200))
             return
           } else if (m.lastPromptTokens !== undefined || m.lastCompletionTokens !== undefined) {
@@ -240,19 +269,16 @@ export function useChat(effort: string, onError: (message: string) => void) {
         }
       }
     },
-    [patchEntry, setHistory, setHistoryFn, setSessions],
+    [patchEntry, patchView, setHistory, setHistoryFn, setSessions],
   )
 
-  // 重新附加：页面重开/切换会话时同步当前会话（进行中的生成重放事件重建视图；未在生成则一次性 d 收尾）
-  const attachRef = useRef<AbortController | null>(null)
-  // 当前已被本设备占用的会话流（POST 生成流或 GET 附加流）；全局 gen 事件据此避免重复附加
-  const activeStreamRef = useRef<number | null>(null)
+  // 重新附加：页面重开/切换会话时同步该会话（生成中→重放并续流；空闲→一次性 d 回灌权威历史）。
+  // 每个会话最多一条附加流；同一会话已有流（自己发起的生成流或已附加）时不重复附加。
   const attachToSession = useCallback(
     async (sid: number) => {
-      attachRef.current?.abort() // 同时只保留一条附加流（服务器生成不受影响）
+      if (hasStream(sid)) return
       const controller = new AbortController()
-      attachRef.current = controller
-      activeStreamRef.current = sid
+      attachStreams.current.set(sid, controller)
       try {
         const res = await fetch(`/api/sessions/${sid}/stream`, { signal: controller.signal })
         if (!res.ok || !res.body) return
@@ -260,7 +286,7 @@ export function useChat(effort: string, onError: (message: string) => void) {
       } catch {
         // 切换会话 abort / 服务器不可达：静默
       } finally {
-        if (activeStreamRef.current === sid) activeStreamRef.current = null
+        if (attachStreams.current.get(sid) === controller) attachStreams.current.delete(sid)
       }
     },
     [consumeStream],
@@ -268,12 +294,13 @@ export function useChat(effort: string, onError: (message: string) => void) {
   attachFnRef.current = attachToSession
 
   // ===== 跨设备同步：WebSocket 通道（/api/events）=====
-  // 会话层变更（列表/生成态/条目编辑）→ 直接落到镜像；本会话开始生成 → 附加会话流重放内容增量
+  // 会话层变更（列表/生成态/条目编辑）→ 直接落到镜像；被查看的会话生成中 → 附加会话流重放内容增量
   const applySync = useCallback(
     (m: SyncEvent) => {
       const cur = currentSessionIdRef.current
       if (m.list) {
         const meta = m.list
+        const known = new Set(meta.map((n) => n.id))
         // 合并元数据（保留本地已加载的历史：快照与变更通知都不带 history）
         setSessions((x) => {
           const prev = new Map(x.map((s) => [s.id, s]))
@@ -282,28 +309,25 @@ export function useChat(effort: string, onError: (message: string) => void) {
             return old ? { ...old, ...n } : { ...n, history: [] }
           })
         })
-        // 本设备的当前会话已被其他设备删除：跟随服务器 currentId 切走并复位（其余情况不抢焦点）
-        if (cur != null && m.currentId !== undefined && !meta.some((s) => s.id === cur)) {
-          attachRef.current?.abort()
-          activeStreamRef.current = null
+        // 被删掉的会话不再需要它的视图态与附加流
+        setViewStates((m0) => {
+          if (!m0.size) return m0
+          const keep = new Map([...m0].filter(([sid]) => known.has(sid)))
+          return keep.size === m0.size ? m0 : keep
+        })
+        for (const [sid, ctl] of [...attachStreams.current]) if (!known.has(sid)) {
+          ctl.abort()
+          attachStreams.current.delete(sid)
+        }
+        // 本设备的当前会话已被其他设备删除：跟随服务器 currentId 切走（其余情况不抢焦点）
+        if (cur != null && m.currentId !== undefined && !known.has(cur)) {
           setCurrentSessionId(m.currentId)
-          setGenId(null)
-          setExecutingId(null)
-          setCompacting(false)
-          setBusy(false)
-          busyRef.current = false
           if (m.currentId != null) void attachToSession(m.currentId)
           return
         }
         // 连接/断线重连后的快照：重新附加本会话流——生成中→重放增量续流；空闲→一次性 d 回灌权威历史
         // （重连期间漏收的 {sid,entry}/{sid,history} 由此补齐；本设备正持有该会话流时跳过）
-        if (cur != null && activeStreamRef.current !== cur) {
-          if (meta.some((s) => s.id === cur && s.generating)) {
-            setBusy(true)
-            busyRef.current = true
-          }
-          void attachToSession(cur)
-        }
+        if (cur != null) void attachToSession(cur)
         return
       }
       if (m.sid === undefined) return
@@ -321,18 +345,20 @@ export function useChat(effort: string, onError: (message: string) => void) {
               : s,
           ),
         )
-        if (m.sid !== cur) return
         if (m.gen) {
-          // 其他设备在本会话开始生成：置忙并附加会话流（重放缓冲事件 → 内容实时同步）
-          setBusy(true)
-          busyRef.current = true
-          if (activeStreamRef.current !== m.sid) void attachToSession(m.sid)
-        } else {
-          setGenId(null)
-          setExecutingId(null)
-          setCompacting(false)
-          setBusy(false)
-          busyRef.current = false
+          // 这个会话开始生成：正在看它就附加会话流（重放缓冲事件 → 内容实时同步）；没在看则只更新侧栏状态
+          if (m.sid === cur) void attachToSession(m.sid)
+          return
+        }
+        // 结束：清掉该会话的视图态；没在看它 → 弹通知
+        // （自己发起的生成，失败已经由发起时的通知报过，这里不重复弹）
+        patchView(m.sid, { genId: null, executingId: null, compacting: false })
+        const own = ownGenSids.current.delete(m.sid)
+        const name = `会话「${m.title ?? m.sid}」`
+        if (m.err) {
+          if (m.sid !== cur && !own) onNotifyRef.current({ title: `${name}生成失败`, description: m.err.slice(0, 200), variant: 'error' })
+        } else if (m.sid !== cur) {
+          onNotifyRef.current({ title: m.stopped ? `${name}已停止` : `${name}已完成`, variant: 'info' })
         }
       } else if (m.entry) {
         patchEntry(m.sid, m.entry.id, m.entry)
@@ -340,7 +366,7 @@ export function useChat(effort: string, onError: (message: string) => void) {
         setHistory(m.sid, m.history)
       }
     },
-    [attachToSession, patchEntry, setHistory, setSessions],
+    [attachToSession, patchEntry, patchView, setHistory, setSessions],
   )
 
   // WS 常驻 + 断线重连（1s 固定退避）：服务器重启、移动端休眠回前台都能自动接上；
@@ -375,14 +401,12 @@ export function useChat(effort: string, onError: (message: string) => void) {
   }, [applySync])
 
 
-  // 流式指令公共骨架：busy 管理 + 失败分类（停止=静默；其他=移除乐观条目+常驻通知）
+  // 流式指令公共骨架：按会话登记流 + 失败分类（停止=静默；其他=移除乐观条目+常驻通知+重新水合该会话）
   const startStream = useCallback(
     async (sessionId: number, url: string, body: unknown, tempId?: string) => {
-      setBusy(true)
-      busyRef.current = true
       const controller = new AbortController()
-      abortRef.current = controller
-      activeStreamRef.current = sessionId // 本设备的生成流即该会话流：全局 gen 事件不再重复附加
+      genStreams.current.set(sessionId, controller)
+      ownGenSids.current.add(sessionId)
       try {
         const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal })
         if (!res.ok || !res.body) {
@@ -396,28 +420,21 @@ export function useChat(effort: string, onError: (message: string) => void) {
         } else {
           if (tempId) setHistoryFn(sessionId, (h) => h.filter((e) => e.id !== tempId))
           onErrorRef.current(((err as Error).message || '未知错误').slice(0, 200))
-          // 流中断：镜像可能停在半途，从服务器重新水合恢复权威状态
-          fetch('/api/sessions')
-            .then((r) => (r.ok ? r.json() : Promise.reject(new Error('resync failed'))))
-            .then((d: { sessions?: Session[] }) => d.sessions && setSessions(d.sessions))
-            .catch(() => {})
+          // 流中断：该会话镜像可能停在半途 → 立刻重新附加，回灌权威历史（生成仍在跑则续流）
+          if (genStreams.current.get(sessionId) === controller) genStreams.current.delete(sessionId)
+          void attachToSession(sessionId)
         }
       } finally {
-        abortRef.current = null
-        if (activeStreamRef.current === sessionId) activeStreamRef.current = null
-        busyRef.current = false
-        setBusy(false)
-        setGenId(null)
-        setExecutingId(null)
+        if (genStreams.current.get(sessionId) === controller) genStreams.current.delete(sessionId)
+        patchView(sessionId, { genId: null, executingId: null })
       }
     },
-    [consumeStream, setHistoryFn],
+    [attachToSession, consumeStream, patchView, setHistoryFn],
   )
 
   // ===== 指令 =====
   const sendMessage = useCallback(
     (text: string, images: string[]) => {
-      if (busyRef.current) return
       if (!text && !images.length) return
       const body = { content: text, ...(images.length ? { images } : {}) }
       const fire = (sid: number) => {
@@ -430,12 +447,17 @@ export function useChat(effort: string, onError: (message: string) => void) {
       }
       const cur = currentSessionIdRef.current
       if (cur != null) {
+        // 目标会话正在生成：服务器会 409，这里提前拦一句（同会话排队未实现，只能先停止）
+        if (sessionsRef.current.find((s) => s.id === cur)?.generating) {
+          setStatus('该会话正在生成中：先停止，或切到别的会话继续')
+          return
+        }
         fire(cur)
         return
       }
       // 无会话（最后一个被删除）：自动创建新会话后发送；创建失败给可见提示
-      busyRef.current = true
-      setBusy(true)
+      if (creatingRef.current) return
+      creatingRef.current = true
       fetch('/api/sessions', { method: 'POST' })
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
         .then(({ session, currentId: cid }: { session: Session; currentId: number }) => {
@@ -445,9 +467,10 @@ export function useChat(effort: string, onError: (message: string) => void) {
           fire(cid)
         })
         .catch(() => {
-          busyRef.current = false
-          setBusy(false)
           setStatus('无法连接服务器，不能创建会话')
+        })
+        .finally(() => {
+          creatingRef.current = false
         })
     },
     [setHistoryFn, setSessions, setCurrentSessionId, startStream, setStatus],
@@ -456,7 +479,6 @@ export function useChat(effort: string, onError: (message: string) => void) {
   // 重试：服务器执行回退 + 重生成，镜像随 h/a 事件更新
   const retryEntry = useCallback(
     (id: string) => {
-      if (busyRef.current) return
       const cur = currentSessionIdRef.current
       if (cur == null) return
       void startStream(cur, `/api/sessions/${cur}/messages/${id}/retry`, {})
@@ -466,7 +488,6 @@ export function useChat(effort: string, onError: (message: string) => void) {
 
   // 手动压缩上下文：服务器生成 summary 条目，m 事件让气泡实时出现在聊天里
   const compactContext = useCallback(() => {
-    if (busyRef.current) return
     const cur = currentSessionIdRef.current
     if (cur == null) return
     void startStream(cur, `/api/sessions/${cur}/compact`, {})
@@ -534,7 +555,6 @@ export function useChat(effort: string, onError: (message: string) => void) {
   const deleteEntry = useCallback((id: string) => deleteEntries([id]), [deleteEntries])
 
   const newSession = useCallback(() => {
-    if (busyRef.current) return
     fetch('/api/sessions', { method: 'POST' })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then(({ session, currentId: cid }: { session: Session; currentId: number }) => {
@@ -547,9 +567,15 @@ export function useChat(effort: string, onError: (message: string) => void) {
 
   const deleteSession = useCallback(
     (id?: number) => {
-      if (busyRef.current) return
       const target = id ?? currentSessionIdRef.current
       if (target == null) return
+      if (sessionsRef.current.find((s) => s.id === target)?.generating) {
+        setStatus('该会话正在生成中：先停止再删除')
+        return
+      }
+      attachStreams.current.get(target)?.abort()
+      attachStreams.current.delete(target)
+      patchView(target, { genId: null, executingId: null, compacting: false })
       fetch(`/api/sessions/${target}`, { method: 'DELETE' })
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
         .then(({ sessions: all, currentId: cid }: { sessions: Session[]; currentId: number | null }) => {
@@ -579,14 +605,16 @@ export function useChat(effort: string, onError: (message: string) => void) {
 
   const switchSession = useCallback(
     (id: number) => {
-      if (busyRef.current || id === currentSessionIdRef.current) return
-      attachRef.current?.abort() // 断开旧会话的附加（服务器生成不受影响）
-      setCurrentSessionId(id) // 镜像立即切换
-      if (sessionsRef.current.find((s) => s.id === id)?.generating) {
-        setBusy(true)
-        busyRef.current = true
+      const prev = currentSessionIdRef.current
+      if (id === prev) return
+      // 只断"离开的会话"的附加流（服务器生成不受影响；回来时会重新附加并重放）；
+      // 本设备发起的生成流不断——它继续把增量写进它自己那个会话的镜像
+      if (prev != null) {
+        attachStreams.current.get(prev)?.abort()
+        attachStreams.current.delete(prev)
       }
-      void attachToSession(id) // 目标会话在生成则重放同步
+      setCurrentSessionId(id) // 镜像立即切换
+      void attachToSession(id) // 目标会话：生成中→续流；空闲→一次性 d 回灌
       fetch(`/api/sessions/${id}/switch`, { method: 'POST' }).catch(() => {}) // 服务器记录 last-active
     },
     [attachToSession],
@@ -603,6 +631,9 @@ export function useChat(effort: string, onError: (message: string) => void) {
     }
   }, [])
 
+  // 视图态：只暴露"当前会话"那一份（App/MessageList 的 props 形状不变）
+  const view = viewStates.get(currentSessionId ?? -1) ?? EMPTY_VIEW
+
   return {
     sessions,
     currentSessionId,
@@ -612,8 +643,8 @@ export function useChat(effort: string, onError: (message: string) => void) {
     renameSession,
     settings,
     saveSettings,
-    busy,
-    compacting,
+    busy: !!sessions.find((s) => s.id === currentSessionId)?.generating,
+    compacting: view.compacting,
     status,
     setStatus,
     history: sessions.find((s) => s.id === currentSessionId)?.history ?? [],
@@ -622,10 +653,10 @@ export function useChat(effort: string, onError: (message: string) => void) {
     editEntry,
     deleteEntry,
     deleteEntries,
-    executingId,
+    executingId: view.executingId,
     retryEntry,
     compactContext,
     refreshUsage,
-    genId,
+    genId: view.genId,
   }
 }
