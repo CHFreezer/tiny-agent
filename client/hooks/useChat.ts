@@ -26,6 +26,28 @@ interface StreamEvent {
   lastCompletionTokens?: number
 }
 
+// 全局同步事件（WebSocket /api/events）：服务器把会话层变更推给所有设备；
+// 内容级增量仍走会话流（GET /api/sessions/:id/stream），本设备据此在需要时附加该流重放内容
+type SessionMeta = Omit<Session, 'history'>
+
+const sleep = (ms: number): Promise<void> => {
+  const { promise, resolve } = Promise.withResolvers<void>()
+  setTimeout(resolve, ms)
+  return promise
+}
+
+interface SyncEvent {
+  list?: SessionMeta[] // 会话列表元数据（连接时的初始快照 + 新建/删除/重命名）
+  currentId?: number | null
+  sid?: number
+  gen?: boolean // 某会话开始/结束生成
+  title?: string
+  lastPromptTokens?: number
+  lastCompletionTokens?: number
+  entry?: Entry // 条目被其他设备编辑
+  history?: Entry[] // 条目被其他设备删除
+}
+
 export function useChat(effort: string, onError: (message: string) => void) {
   const [sessions, setSessions] = useState<Session[]>([])
   const [currentSessionId, setCurrentSessionId] = useState<number | null>(null)
@@ -73,7 +95,7 @@ export function useChat(effort: string, onError: (message: string) => void) {
           data = await Promise.all([fetchSessions(), fetchSettings()])
           break
         } catch {
-          await new Promise((r) => setTimeout(r, 500))
+          await sleep(500)
         }
       }
       if (cancelled) return
@@ -223,21 +245,135 @@ export function useChat(effort: string, onError: (message: string) => void) {
 
   // 重新附加：页面重开/切换会话时同步当前会话（进行中的生成重放事件重建视图；未在生成则一次性 d 收尾）
   const attachRef = useRef<AbortController | null>(null)
+  // 当前已被本设备占用的会话流（POST 生成流或 GET 附加流）；全局 gen 事件据此避免重复附加
+  const activeStreamRef = useRef<number | null>(null)
   const attachToSession = useCallback(
     async (sid: number) => {
+      attachRef.current?.abort() // 同时只保留一条附加流（服务器生成不受影响）
       const controller = new AbortController()
       attachRef.current = controller
+      activeStreamRef.current = sid
       try {
         const res = await fetch(`/api/sessions/${sid}/stream`, { signal: controller.signal })
         if (!res.ok || !res.body) return
         await consumeStream(sid, res)
       } catch {
         // 切换会话 abort / 服务器不可达：静默
+      } finally {
+        if (activeStreamRef.current === sid) activeStreamRef.current = null
       }
     },
     [consumeStream],
   )
   attachFnRef.current = attachToSession
+
+  // ===== 跨设备同步：WebSocket 通道（/api/events）=====
+  // 会话层变更（列表/生成态/条目编辑）→ 直接落到镜像；本会话开始生成 → 附加会话流重放内容增量
+  const applySync = useCallback(
+    (m: SyncEvent) => {
+      const cur = currentSessionIdRef.current
+      if (m.list) {
+        const meta = m.list
+        // 合并元数据（保留本地已加载的历史：快照与变更通知都不带 history）
+        setSessions((x) => {
+          const prev = new Map(x.map((s) => [s.id, s]))
+          return meta.map((n) => {
+            const old = prev.get(n.id)
+            return old ? { ...old, ...n } : { ...n, history: [] }
+          })
+        })
+        // 本设备的当前会话已被其他设备删除：跟随服务器 currentId 切走并复位（其余情况不抢焦点）
+        if (cur != null && m.currentId !== undefined && !meta.some((s) => s.id === cur)) {
+          attachRef.current?.abort()
+          activeStreamRef.current = null
+          setCurrentSessionId(m.currentId)
+          setGenId(null)
+          setExecutingId(null)
+          setCompacting(false)
+          setBusy(false)
+          busyRef.current = false
+          if (m.currentId != null) void attachToSession(m.currentId)
+          return
+        }
+        // 连接/断线重连后的快照：重新附加本会话流——生成中→重放增量续流；空闲→一次性 d 回灌权威历史
+        // （重连期间漏收的 {sid,entry}/{sid,history} 由此补齐；本设备正持有该会话流时跳过）
+        if (cur != null && activeStreamRef.current !== cur) {
+          if (meta.some((s) => s.id === cur && s.generating)) {
+            setBusy(true)
+            busyRef.current = true
+          }
+          void attachToSession(cur)
+        }
+        return
+      }
+      if (m.sid === undefined) return
+      if (m.gen !== undefined) {
+        setSessions((x) =>
+          x.map((s) =>
+            s.id === m.sid
+              ? {
+                  ...s,
+                  generating: m.gen,
+                  ...(m.title !== undefined ? { title: m.title } : {}),
+                  ...(m.lastPromptTokens !== undefined ? { lastPromptTokens: m.lastPromptTokens } : {}),
+                  ...(m.lastCompletionTokens !== undefined ? { lastCompletionTokens: m.lastCompletionTokens } : {}),
+                }
+              : s,
+          ),
+        )
+        if (m.sid !== cur) return
+        if (m.gen) {
+          // 其他设备在本会话开始生成：置忙并附加会话流（重放缓冲事件 → 内容实时同步）
+          setBusy(true)
+          busyRef.current = true
+          if (activeStreamRef.current !== m.sid) void attachToSession(m.sid)
+        } else {
+          setGenId(null)
+          setExecutingId(null)
+          setCompacting(false)
+          setBusy(false)
+          busyRef.current = false
+        }
+      } else if (m.entry) {
+        patchEntry(m.sid, m.entry.id, m.entry)
+      } else if (m.history) {
+        setHistory(m.sid, m.history)
+      }
+    },
+    [attachToSession, patchEntry, setHistory, setSessions],
+  )
+
+  // WS 常驻 + 断线重连（1s 固定退避）：服务器重启、移动端休眠回前台都能自动接上；
+  // 存活由服务器 ws 协议级 ping/pong 判定，应用层不发心跳消息
+  useEffect(() => {
+    let alive = true
+    let ws: WebSocket | null = null
+    let timer: number | undefined
+    const connect = () => {
+      const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/events`
+      ws = new WebSocket(url)
+      ws.onmessage = (e) => {
+        try {
+          applySync(JSON.parse(String(e.data)) as SyncEvent)
+        } catch {
+          // 非 JSON 帧：忽略
+        }
+      }
+      // 握手失败/连接断开都会触发 close（error 之后必跟 close），统一在这里退避重连
+      ws.onclose = () => {
+        if (!alive) return
+        clearTimeout(timer)
+        timer = window.setTimeout(connect, 1000)
+      }
+    }
+    connect()
+    return () => {
+      alive = false
+      clearTimeout(timer)
+      ws?.close()
+    }
+  }, [applySync])
+
 
   // 流式指令公共骨架：busy 管理 + 失败分类（停止=静默；其他=移除乐观条目+常驻通知）
   const startStream = useCallback(
@@ -246,6 +382,7 @@ export function useChat(effort: string, onError: (message: string) => void) {
       busyRef.current = true
       const controller = new AbortController()
       abortRef.current = controller
+      activeStreamRef.current = sessionId // 本设备的生成流即该会话流：全局 gen 事件不再重复附加
       try {
         const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal })
         if (!res.ok || !res.body) {
@@ -267,6 +404,7 @@ export function useChat(effort: string, onError: (message: string) => void) {
         }
       } finally {
         abortRef.current = null
+        if (activeStreamRef.current === sessionId) activeStreamRef.current = null
         busyRef.current = false
         setBusy(false)
         setGenId(null)
@@ -301,7 +439,8 @@ export function useChat(effort: string, onError: (message: string) => void) {
       fetch('/api/sessions', { method: 'POST' })
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
         .then(({ session, currentId: cid }: { session: Session; currentId: number }) => {
-          setSessions((x) => [session, ...x])
+          // 服务器的 list 广播先于本响应到达：按 id 去重，避免同一个会话被插入两次
+          setSessions((x) => [session, ...x.filter((s) => s.id !== session.id)])
           setCurrentSessionId(cid)
           fire(cid)
         })
@@ -399,7 +538,8 @@ export function useChat(effort: string, onError: (message: string) => void) {
     fetch('/api/sessions', { method: 'POST' })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then(({ session, currentId: cid }: { session: Session; currentId: number }) => {
-        setSessions((x) => [session, ...x])
+        // 服务器的 list 广播先于本响应到达：按 id 去重，避免同一个会话被插入两次
+        setSessions((x) => [session, ...x.filter((s) => s.id !== session.id)])
         setCurrentSessionId(cid)
       })
       .catch(() => setStatus('保存失败（服务器不可达？）'))

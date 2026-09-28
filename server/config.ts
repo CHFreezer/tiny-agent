@@ -12,6 +12,21 @@ const dataDirArg = (() => {
 })()
 export const DATA_DIR = dataDirArg ? path.resolve(dataDirArg) : path.join(process.cwd(), 'data')
 export const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json')
+// 监听端口优先级：--port 参数（npm run dev:server -- --port <端口>）> 环境变量 PORT > 3000；非法值一律回退缺省，避免 listen 抛错
+const portOf = (v: string | undefined) => {
+  const n = Number(v)
+  return Number.isInteger(n) && n > 0 && n < 65536 ? n : undefined
+}
+const portArg = (() => {
+  const i = process.argv.indexOf('--port')
+  if (i < 0) return undefined
+  if (process.argv[i + 1] === undefined || process.argv[i + 1].startsWith('--')) {
+    console.error('[server] --port 需要一个端口参数')
+    process.exit(1)
+  }
+  return portOf(process.argv[i + 1])
+})()
+export const PORT = portArg ?? portOf(process.env.PORT) ?? 3000
 fs.mkdirSync(path.join(DATA_DIR, 'sessions'), { recursive: true })
 // 工具工作区：pwsh 工作目录 + read_image 相对路径基准；模型相对文件操作落在这里；内置工具的 %TEMP% 统一重定向到其 tmp/
 export const WORKSPACE_DIR = path.join(DATA_DIR, 'workspace')

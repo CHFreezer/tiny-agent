@@ -1,15 +1,19 @@
+import { createServer } from 'node:http'
 import express from 'express'
+import { PORT } from './config.ts'
 import { closeAllMcp, sweepWorkspace, syncMcp } from './mcp.ts'
 import { loadAll } from './sessions.ts'
+import { attachEvents } from './events.ts'
 import { registerRoutes } from './routes.ts'
 import { registerTts } from './tts.ts'
-
-const PORT = Number(process.env.PORT) || 3000
 
 const app = express()
 app.use(express.json({ limit: '20mb' })) // 图片 base64 可能较大
 registerRoutes(app)
 registerTts(app)
+
+const server = createServer(app)
+attachEvents(server) // /api/events：跨设备状态同步的 WebSocket 通道（同端口升级握手）
 
 sweepWorkspace() // 启动时清扫工具工作区的过期文件
 loadAll()
@@ -22,6 +26,6 @@ const shutdownMcp = () => {
 process.on('SIGINT', shutdownMcp)
 process.on('SIGTERM', shutdownMcp)
 
-app.listen(PORT, '127.0.0.1', () => {
+server.listen(PORT, '127.0.0.1', () => {
   console.log(`[server] http://127.0.0.1:${PORT}`)
 })

@@ -5,6 +5,7 @@ import { errMsg, readSettings } from './config.ts'
 import { sessions, saveSession } from './sessions.ts'
 import { buildChatRequest, getOpenAI } from './upstream.ts'
 import { executeTool } from './tools.ts'
+import { storeImage } from './images.ts'
 import { addUsage, compactContext } from './compact.ts'
 import type { Entry, Session, ToolCall, Usage } from './types.ts'
 
@@ -168,7 +169,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
       try {
         const r = await executeTool(tc, opts.signal)
         out = r.text
-        if (r.images?.length) te.images = r.images
+        if (r.images?.length) te.images = r.images.map((src) => storeImage(session.id, src))
       } catch {
         out = '(已停止)'
       }

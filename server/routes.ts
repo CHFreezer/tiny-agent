@@ -20,9 +20,25 @@ import { getOpenAI, normalizeMessage, toApiMessages } from './upstream.ts'
 import { mcpStatus, syncMcp } from './mcp.ts'
 import { compactContext } from './compact.ts'
 import { currentTools } from './tools.ts'
+import { resolveImage, storeImage } from './images.ts'
 import { attachClient, endAll, generate, gens, guardSession, makeW, ndjsonHeaders } from './generate.ts'
+import { broadcast, syncList } from './events.ts'
 import type { Gen } from './generate.ts'
-import type { Entry, McpServerConfig, Settings, ToolCall, Usage } from './types.ts'
+import type { Entry, McpServerConfig, Session, Settings, ToolCall, Usage } from './types.ts'
+
+// 生成开始/结束：登记 gens + 跨设备广播（其他设备据此附加该会话流重放事件，或在结束时收起生成态）
+const beginGen = (s: Session, res: express.Response): Gen => {
+  const g: Gen = { controller: new AbortController(), events: [], clients: new Set() }
+  gens.set(s.id, g)
+  broadcast({ sid: s.id, gen: true, title: s.title })
+  attachClient(g, res)
+  return g
+}
+const endGen = (s: Session, g: Gen): void => {
+  endAll(g)
+  gens.delete(s.id)
+  broadcast({ sid: s.id, gen: false, title: s.title, lastPromptTokens: s.lastPromptTokens, lastCompletionTokens: s.lastCompletionTokens })
+}
 
 export function registerRoutes(app: express.Express): void {
   // ===== 设置 =====
@@ -82,6 +98,7 @@ export function registerRoutes(app: express.Express): void {
 
   app.post('/api/sessions', (_req, res) => {
     const s = createSession()
+    syncList() // 其他设备的侧栏同步出现新会话
     res.json({ session: s, currentId: getCurrentId() })
   })
 
@@ -97,6 +114,7 @@ export function registerRoutes(app: express.Express): void {
     const { title } = req.body as { title?: string }
     if (typeof title !== 'string' || !title.trim()) return res.status(400).json({ error: 'title required' })
     const s = renameSession(id, title)
+    syncList()
     res.json({ session: s })
   })
 
@@ -104,7 +122,9 @@ export function registerRoutes(app: express.Express): void {
     const id = Number(req.params.id)
     if (!sessions.has(id)) return res.status(404).json({ error: '会话不存在' })
     if (gens.has(id)) return res.status(409).json({ error: '会话正在生成中' })
-    res.json(deleteSession(id)!)
+    const r = deleteSession(id)!
+    syncList() // 其他设备同步移除该会话（正在看它的设备会跟随 currentId 切走）
+    res.json(r)
   })
 
   // 发送消息：服务器追加 user 条目 → 启动生成（流式）
@@ -116,23 +136,21 @@ export function registerRoutes(app: express.Express): void {
       return res.status(400).json({ error: 'content or images required' })
     }
     void withLock(s.id, async () => {
-      const g: Gen = { controller: new AbortController(), events: [], clients: new Set() }
-      gens.set(s.id, g)
-      const w = makeW(g)
       const user: Entry = { id: randomUUID(), role: 'user', content: content ?? '', ts: Date.now() }
-      if (Array.isArray(images) && images.length) user.images = images
+      // 上传的图片落盘 → 条目里只存 URL（后续 stream/JSON 都不再携带 base64）
+      if (Array.isArray(images) && images.length) user.images = images.map((src) => storeImage(s.id, src))
       s.history.push(user)
       if (s.title === '新会话' && content) s.title = content.slice(0, 20)
       saveSession(s)
+      const g = beginGen(s, res) // 先广播 gen:true（含新标题），其他设备随即附加本会话流
+      const w = makeW(g)
       w({ h: s.history })
-      attachClient(g, res)
       try {
         await generate(s, w, () => endAll(g), { insertPos: s.history.length, signal: g.controller.signal })
       } catch (err) {
         w({ e: errMsg(err), d: 1, title: s.title, history: s.history })
       } finally {
-        endAll(g)
-        gens.delete(s.id)
+        endGen(s, g)
       }
     }).catch((err) => {
       try {
@@ -158,19 +176,16 @@ export function registerRoutes(app: express.Express): void {
     const insertPos = entry.role === 'user' ? idx + 1 : idx
     const staleFrom = insertPos + 1
     void withLock(s.id, async () => {
-      const g: Gen = { controller: new AbortController(), events: [], clients: new Set() }
-      gens.set(s.id, g)
-      const w = makeW(g)
       saveSession(s)
+      const g = beginGen(s, res)
+      const w = makeW(g)
       w({ h: s.history })
-      attachClient(g, res)
       try {
         await generate(s, w, () => endAll(g), { insertPos, staleFrom, signal: g.controller.signal })
       } catch (err) {
         w({ e: errMsg(err), d: 1, title: s.title, history: s.history })
       } finally {
-        endAll(g)
-        gens.delete(s.id)
+        endGen(s, g)
       }
     }).catch((err) => {
       try {
@@ -210,10 +225,8 @@ export function registerRoutes(app: express.Express): void {
     if (!s) return
     if (!s.history.length) return res.status(400).json({ error: '会话为空，无需压缩' })
     void withLock(s.id, async () => {
-      const g: Gen = { controller: new AbortController(), events: [], clients: new Set() }
-      gens.set(s.id, g)
+      const g = beginGen(s, res)
       const w = makeW(g)
-      attachClient(g, res)
       const usage: Usage = { prompt: 0, completion: 0, total: 0 }
       try {
         await compactContext(s, w, g.controller.signal, usage)
@@ -221,8 +234,7 @@ export function registerRoutes(app: express.Express): void {
         w({ e: errMsg(err) })
       } finally {
         w({ d: 1, title: s.title, history: s.history, lastPromptTokens: s.lastPromptTokens, lastCompletionTokens: s.lastCompletionTokens })
-        endAll(g)
-        gens.delete(s.id)
+        endGen(s, g)
       }
     }).catch((err) => {
       try {
@@ -230,6 +242,17 @@ export function registerRoutes(app: express.Express): void {
       } catch {
         // 连接已断
       }
+    })
+  })
+
+  // ===== 会话图片：条目里存的就是这个 URL（前端 <img src> 直接用）。
+  // 内容寻址（文件名含内容哈希）→ 可 immutable 长缓存；与 client/dist 的静态资源无关，独立路由。
+  app.get('/api/sessions/:id/files/:name', (req, res) => {
+    const file = resolveImage(Number(req.params.id), req.params.name)
+    if (!file) return res.status(404).json({ error: '图片不存在' })
+    // dotfiles: 'allow' —— 数据目录路径里可能含点开头的段（如 ~/.local/share/...），send 默认会 404
+    res.sendFile(file, { maxAge: '1y', immutable: true, dotfiles: 'allow' }, (err) => {
+      if (err && !res.headersSent) res.status(404).end()
     })
   })
 
@@ -298,6 +321,7 @@ export function registerRoutes(app: express.Express): void {
       if (reasoning !== undefined) entry.reasoning = reasoning || undefined
       if (tool_calls !== undefined) entry.tool_calls = tool_calls
       saveSession(s)
+      broadcast({ sid: s.id, entry }) // 其他设备同步该条目的编辑
       res.json({ entry })
     })
   })
@@ -311,6 +335,7 @@ export function registerRoutes(app: express.Express): void {
       const remaining = applyDelete(s, [req.params.eid])
       if (!remaining) return res.status(400).json({ error: '删除后会话将以助手回复开头，无法继续对话' })
       saveSession(s)
+      broadcast({ sid: s.id, history: remaining })
       res.json({ history: remaining })
     })
   })
@@ -326,6 +351,7 @@ export function registerRoutes(app: express.Express): void {
       const remaining = applyDelete(s, ids)
       if (!remaining) return res.status(400).json({ error: '删除后会话将以助手回复开头，无法继续对话' })
       saveSession(s)
+      broadcast({ sid: s.id, history: remaining })
       res.json({ history: remaining })
     })
   })

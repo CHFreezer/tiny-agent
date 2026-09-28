@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { DATA_DIR } from './config.ts'
+import { removeImages, sweepImages } from './images.ts'
 import type { Entry, Session } from './types.ts'
 
 // ===== 会话存储：内存为权威 + 写穿到磁盘（每会话一个文件，_index.json 存 currentId） =====
@@ -57,6 +58,8 @@ export function loadAll(): void {
 export function saveSession(s: Session): void {
   fs.mkdirSync(SESSIONS_DIR, { recursive: true })
   fs.writeFileSync(path.join(SESSIONS_DIR, `${s.id}.json`), JSON.stringify(s))
+  // 图片随条目增删自动回收（调用方保证：先落盘图片再写条目，见 images.ts）
+  sweepImages(s.id, s.history)
 }
 
 function saveIndex(): void {
@@ -116,6 +119,7 @@ export function deleteSession(id: number): { sessions: Session[]; currentId: num
   } catch {
     // 文件不存在
   }
+  removeImages(id)
   if (currentId === id) {
     const rest = listSorted()
     currentId = rest.length ? rest[0].id : null

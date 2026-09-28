@@ -1,6 +1,7 @@
 import OpenAI from 'openai'
 import { readMemories } from './memories.ts'
 import { currentTools } from './tools.ts'
+import { toDataUrl } from './images.ts'
 import { readSettings } from './config.ts'
 import type { Entry } from './types.ts'
 
@@ -76,7 +77,7 @@ export function toApiMessages(history: Entry[]) {
       // 带图工具结果（read_image）：tool 消息只能是文本，图片以紧随的 user 消息注入
       if (m.images?.length) {
         const content: Array<Record<string, unknown>> = [{ type: 'text', text: '以下是读取的图片：' }]
-        for (const url of m.images) content.push({ type: 'image_url', image_url: { url } })
+        for (const url of m.images) content.push({ type: 'image_url', image_url: { url: toDataUrl(url) } })
         out.push({ role: 'user', content })
       }
       return out
@@ -87,7 +88,7 @@ export function toApiMessages(history: Entry[]) {
     if (m.role === 'user' && m.images?.length) {
       const content: Array<Record<string, unknown>> = []
       if (m.content) content.push({ type: 'text', text: m.content })
-      for (const url of m.images) content.push({ type: 'image_url', image_url: { url } })
+      for (const url of m.images) content.push({ type: 'image_url', image_url: { url: toDataUrl(url) } })
       return [{ role: 'user', content }]
     }
     return [{ role: m.role, content: m.content }]

@@ -11,7 +11,7 @@ export interface Entry {
   reasoning?: string
   tool_calls?: ToolCall[]
   tool_call_id?: string
-  images?: string[]
+  images?: string[] // 图片 URL（/api/sessions/<id>/files/<名>，前端 <img src> 直接用；发上游前读回 data URL）
   summaryStatus?: 'failed' // 压缩摘要生成失败（截断/报错）：不是有效分割点
   ts?: number // 创建时间（毫秒），前端显示相对时间
 }
@@ -43,7 +43,7 @@ export interface Settings {
 }
 export interface ToolResult {
   text: string
-  images?: string[] // data URL：随工具结果注入上下文，让模型看到图片（read_image）
+  images?: string[] // data URL：工具结果随上下文注入（read_image），服务端落盘后条目录 URL
 }
 // 上游真实 token 用量（stream_options.include_usage 的末尾 chunk）
 export interface Usage {
