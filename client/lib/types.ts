@@ -13,7 +13,9 @@ export interface Entry {
   tool_call_id?: string
   images?: string[]
   diff?: EditDiff // edit 工具结果的结构化 diff（仅展示）
+  search?: SearchResult // search 工具的结构化结果（仅展示）
   error?: boolean // 工具结果失败（前端标红；不发给上游）
+  live?: boolean // 工具结果正在实时输出（仅前端临时的展示态）
   summaryStatus?: 'failed' // 压缩摘要生成失败：不是有效分割点
   ts?: number // 创建时间（毫秒），前端显示相对时间
 }
@@ -32,6 +34,34 @@ export interface EditDiff {
   kind?: 'hex'
   offset?: string
   blocks: DiffBlock[]
+}
+// search 工具的结构化结果（仅展示）
+export interface SearchLine {
+  line: number
+  text: string
+  ranges: Array<[number, number]>
+  count?: number // 该行命中次数；旧数据没有时回退到 ranges.length
+  kind?: 'match' | 'context' // 缺省 match
+}
+export interface SearchFile {
+  path: string
+  nameMatch?: boolean
+  nameRanges?: Array<[number, number]>
+  matches: SearchLine[]
+}
+export interface SearchResult {
+  pattern: string
+  root: string
+  files: SearchFile[]
+  totalMatches: number
+  nameHits: number
+  truncated: boolean
+  limit?: number
+  timedOut?: boolean
+  nonUtf8?: boolean
+  context?: number
+  include?: string[]
+  exclude?: string[]
 }
 
 export interface Session {

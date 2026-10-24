@@ -168,17 +168,22 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
       w({ x: te.id, pos: session.history.length - 1, tc: tc.id })
       let out: string
       try {
-        const r = await executeTool(tc, opts.signal)
+        // 实时的原始输出（pwsh 等长任务）：只用于前端边执行边显示，结束时被规范化文本覆盖
+        const r = await executeTool(tc, opts.signal, (text) => {
+          te.content = (te.content ?? '') + text
+          w({ x: te.id, o: text })
+        })
         out = r.text
         if (r.images?.length) te.images = r.images.map((src) => storeImage(session.id, src))
         if (r.diff) te.diff = r.diff
+        if (r.search) te.search = r.search
         if (r.isError) te.error = true
       } catch {
         out = '(已停止)'
       }
       te.content = out
       saveSession(session)
-      w({ x: te.id, r: out, tc: tc.id, ...(te.images ? { imgs: te.images } : {}), ...(te.diff ? { diff: te.diff } : {}), ...(te.error ? { err: true } : {}) })
+      w({ x: te.id, r: out, tc: tc.id, ...(te.images ? { imgs: te.images } : {}), ...(te.diff ? { diff: te.diff } : {}), ...(te.search ? { search: te.search } : {}), ...(te.error ? { err: true } : {}) })
     }
     if (opts.signal.aborted) break
     // 压缩必须等本轮所有工具结果落库之后：summary 若插在 assistant.tool_calls 与其工具结果之间，

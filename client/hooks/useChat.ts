@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { DEFAULT_SETTINGS, type EditDiff, type Entry, type Session, type Settings, type ToolCall } from '@/lib/types'
+import { DEFAULT_SETTINGS, type EditDiff, type Entry, type SearchResult, type Session, type Settings, type ToolCall } from '@/lib/types'
 import { fetchSessions, fetchSettings, putSettings, type SessionsData } from '@/lib/api'
 
 // 服务器是会话的唯一所有者：浏览器只发指令、只维护视图镜像
@@ -14,8 +14,10 @@ interface StreamEvent {
   r?: string
   t?: { i: number; id?: string; n?: string; a?: string }
   x?: string
+  o?: string // 工具执行中的实时输出增量（pwsh）
   imgs?: string[]
   diff?: EditDiff
+  search?: SearchResult
   err?: boolean // 工具结果失败（x 带 r 时下发；前端标红）
   m?: { id: string; pos?: number; ok?: boolean; err?: string }
   tc?: string
@@ -232,11 +234,18 @@ export function useChat(effort: string, onError: (message: string) => void, onNo
               patchEntry(sessionId, mid, m.m.ok ? {} : { summaryStatus: 'failed' })
             }
           } else if (m.x) {
-            patchView(sessionId, { executingId: null, genId: m.x }) // 工具执行期间，生成索引位于工具结果条目
             const xid = m.x
             if (m.r !== undefined) {
-              patchEntry(sessionId, xid, { content: m.r, ...(m.imgs ? { images: m.imgs } : {}), ...(m.diff ? { diff: m.diff } : {}), ...(m.err ? { error: true } : {}) })
+              // 定稿：规范化文本整体替换实时输出
+              patchView(sessionId, { executingId: null, genId: xid })
+              patchEntry(sessionId, xid, { content: m.r, live: false, ...(m.imgs ? { images: m.imgs } : {}), ...(m.diff ? { diff: m.diff } : {}), ...(m.search ? { search: m.search } : {}), ...(m.err ? { error: true } : {}) })
+            } else if (m.o !== undefined) {
+              // 实时输出增量：追加到工具结果条目（服务端结束时用 r 覆盖）
+              const chunk = m.o
+              setHistoryFn(sessionId, (h) => h.map((e) => (e.id === xid ? { ...e, content: (e.content ?? '') + chunk, live: true } : e)))
             } else {
+              // 工具执行占位：生成索引移到工具结果条目
+              patchView(sessionId, { executingId: null, genId: xid })
               const tc = m.tc ?? ''
               setHistoryFn(sessionId, (h) => {
                 if (h.some((e) => e.id === xid)) return h

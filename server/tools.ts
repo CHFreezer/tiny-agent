@@ -1,11 +1,14 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
+import { StringDecoder } from 'node:string_decoder'
 import OpenAI from 'openai'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { WORKSPACE_DIR, errMsg, readSettings, resolveCwd } from './config.ts'
 import { MCP_TOOL_TIMEOUT, mcpToolMap, mcpTools } from './mcp.ts'
 import { editTool, readTool, writeTool } from './files.ts'
+import { searchTool } from './search.ts'
+import { clipMiddle } from './text.ts'
 import type { ToolCall, ToolResult } from './types.ts'
 
 // 内置工具（OpenAI function calling 格式）
@@ -75,6 +78,50 @@ const WRITE_TOOL: OpenAI.Chat.ChatCompletionTool = {
     },
   },
 }
+const SEARCH_TOOL: OpenAI.Chat.ChatCompletionTool = {
+  type: 'function',
+  function: {
+    name: 'search',
+    description: `在目录或单个文件中搜索文本（ripgrep --json）。path 相对 cwd（默认 workspace，也支持绝对路径），可以是目录或文件；文件名命中也会作为结果返回。
+mode：literal（默认，按字面量匹配，元字符不生效）或 regex（ripgrep 正则，支持 PCRE2 lookaround）。
+flags：可选组合字符串：
+- i = 忽略大小写
+- w = 全词匹配
+示例：{ pattern: "foo.bar", flags: "iw" } 字面量 + 忽略大小写 + 全词；{ pattern: "foo\\\\d+", mode: "regex", flags: "i" }。
+默认搜索隐藏文件，但排除 .git/.hg/.svn/CVS/.DS_Store/node_modules/bower_components/*.code-search（与 VS Code 默认对齐）。
+- max_results：最多结果数（默认 100，上限 1000），达到后立即停止
+- timeout：超时秒数（默认 30，最大 600）
+- context：命中前后各显示 N 行上下文（默认 0，上限 20；上下文不计入结果数）
+- encoding：文件编码（如 gbk / shift_jis / utf-16le）；默认自动/UTF-8。非 UTF-8 文件建议显式指定
+- include：只搜索匹配这些 glob 的文件（如 ["**/*.ts"]；任意层级用 **/ 前缀）
+- exclude：追加排除的 glob 列表，如 ["**/node_modules/**", "**/*.min.js"]（不以 ** 或 / 开头的模式锚定搜索根；任意层级用 **/ 前缀）；默认遵循 .gitignore（即使不在 git 仓库内）`,
+    parameters: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string', description: '搜索文本；默认按字面量，mode:"regex" 时按 ripgrep 正则解释' },
+        mode: { type: 'string', enum: ['literal', 'regex'], description: '匹配模式：literal（默认）或 regex' },
+        flags: { type: 'string', description: '可选组合：i=忽略大小写，w=全词匹配' },
+        path: { type: 'string', description: '搜索路径：目录或文件（相对 cwd，默认 .）' },
+        cwd: { type: 'string', description: '工作目录覆盖（必须已存在；相对路径基于 workspace，省略=workspace）' },
+        max_results: { type: 'number', description: '最多结果数（默认 100，上限 1000）' },
+        timeout: { type: 'number', description: '超时秒数（默认 30，最大 600）' },
+        context: { type: 'number', description: '命中前后各显示 N 行上下文（默认 0，上限 20）' },
+        encoding: { type: 'string', description: '文件编码（如 gbk / shift_jis / utf-16le）；默认自动/UTF-8' },
+        include: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '只搜索匹配这些 glob 的文件（任意层级用 **/ 前缀），如 ["**/*.ts"]',
+        },
+        exclude: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '追加排除的 glob（不以 ** 或 / 开头的模式锚定搜索根；任意层级用 **/ 前缀），如 ["**/node_modules/**", "**/*.min.js"]；默认遵循 .gitignore',
+        },
+      },
+      required: ['pattern'],
+    },
+  },
+}
 const PWSH_TOOL: OpenAI.Chat.ChatCompletionTool = {
   type: 'function',
   function: {
@@ -109,7 +156,7 @@ const READ_IMAGE_TOOL: OpenAI.Chat.ChatCompletionTool = {
 
 // 当前工具集（与生成请求同源）：生成循环与压缩请求共用
 export function currentTools(): OpenAI.Chat.ChatCompletionTool[] {
-  return [...(readSettings().pwsh ? [PWSH_TOOL] : []), READ_TOOL, EDIT_TOOL, WRITE_TOOL, READ_IMAGE_TOOL, ...mcpTools()]
+  return [...(readSettings().pwsh ? [PWSH_TOOL] : []), SEARCH_TOOL, READ_TOOL, EDIT_TOOL, WRITE_TOOL, READ_IMAGE_TOOL, ...mcpTools()]
 }
 
 // MCP 工具结果 → ToolResult：文本 + image content（如 Playwright 截图）转 data URL，
@@ -136,24 +183,69 @@ const PWSH_DEFAULT_TIMEOUT_S = 30
 const PWSH_MAX_TIMEOUT_S = 600
 const PWSH_MAX_CAPTURE_BYTES = 1024 * 1024 // 捕获窗口（滚动）：只留最新这么多字节，超出丢最旧的，不杀进程
 const PWSH_MAX_OUTPUT_CHARS = 10000 // 交给模型的字符上限（头+尾）
-const PWSH_HEAD_CHARS = 2000 // 超限时保留的开头字符数（报错信息常在开头），其余留给结尾
+const PWSH_LIVE_MAX_CHARS = 20000 // 实时回显上限：超过后停止实时推送（结束后仍有截断结果）
 const MCP_MAX_OUTPUT_CHARS = 8000 // MCP 文本结果上限（与 pwsh 同策略）
 
-// 头+尾保留：异常关键信息常出现在开头，只留尾部会丢掉最有用的部分；
-// 超出上限时丢中间并标记省略量（按代理对边界切，避免劈开 emoji/生僻字）
-const clipMiddle = (text: string, max: number, headChars = PWSH_HEAD_CHARS): string => {
-  if (text.length <= max) return text
-  let headEnd = Math.min(headChars, text.length)
-  const headNl = text.lastIndexOf('\n', headEnd)
-  if (headNl > 0) headEnd = headNl
-  else if (headEnd > 0 && /[\uD800-\uDBFF]/.test(text[headEnd - 1])) headEnd--
-  let tailStart = Math.max(0, text.length - (max - headChars))
-  const tailNl = text.indexOf('\n', tailStart)
-  if (tailNl >= 0) tailStart = tailNl + 1
-  else if (tailStart > 0 && /[\uDC00-\uDFFF]/.test(text[tailStart])) tailStart++
-  const head = text.slice(0, headEnd)
-  const tail = text.slice(tailStart)
-  return `${head}\n[... 省略 ${text.length - head.length - tail.length} 字符 ...]\n${tail}`
+const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+// 实时回显流：逐块解码（UTF-8 多字节、ANSI 转义序列都可能被块边界截断，留到下一块）
+function liveTextStream(onText: (text: string) => void) {
+  const decoder = new StringDecoder('utf8')
+  let pending = ''
+  const push = (s: string) => {
+    const text = stripAnsi(s)
+    if (text) onText(text)
+  }
+  return {
+    write(chunk: Buffer) {
+      let s = pending + decoder.write(chunk)
+      pending = ''
+      const cut = /\x1b(?:\[[0-9;]*)?$/.exec(s)
+      if (cut) {
+        pending = cut[0]
+        s = s.slice(0, cut.index)
+      }
+      push(s)
+    },
+    end() {
+      const s = pending + decoder.end()
+      pending = ''
+      push(s)
+    },
+  }
+}
+// 实时回显合批：逐 chunk 推事件会把 NDJSON 撑成海量小包（40ms 一批 + 4KB 立即刷新）
+function makeLiveEmitter(send: (text: string) => void) {
+  let buf = ''
+  let sent = 0
+  let capped = false
+  let timer: NodeJS.Timeout | undefined
+  const flush = () => {
+    if (timer) {
+      clearTimeout(timer)
+      timer = undefined
+    }
+    if (!buf) return
+    const text = buf
+    buf = ''
+    sent += text.length
+    send(text)
+  }
+  return {
+    push(text: string) {
+      if (capped || !text) return
+      const room = PWSH_LIVE_MAX_CHARS - sent - buf.length
+      if (text.length > room) {
+        buf += text.slice(0, Math.max(0, room)) + '\n[实时输出已达上限，已停止实时显示]\n'
+        capped = true
+        flush()
+        return
+      }
+      buf += text
+      if (buf.length >= 4096) flush()
+      else timer ??= setTimeout(flush, 40)
+    },
+    end: flush,
+  }
 }
 
 interface PwshRun {
@@ -164,7 +256,7 @@ interface PwshRun {
   durationMs: number
   timedOut: boolean
 }
-function runPwsh(command: string, timeoutSeconds: number, signal: AbortSignal, cwd: string) {
+function runPwsh(command: string, timeoutSeconds: number, signal: AbortSignal, cwd: string, onOutput?: (text: string) => void) {
   const { promise, resolve, reject } = Promise.withResolvers<PwshRun>()
   const preparedCommand =
     `try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}\n` +
@@ -199,6 +291,17 @@ function runPwsh(command: string, timeoutSeconds: number, signal: AbortSignal, c
   }
   child.stdout.on('data', (chunk: Buffer) => keepLatest(stdoutSink, chunk))
   child.stderr.on('data', (chunk: Buffer) => keepLatest(stderrSink, chunk))
+  // 实时回显（仅前端展示；交给模型的仍是结束时的规范化文本）
+  const live = onOutput ? makeLiveEmitter(onOutput) : null
+  const stdoutLive = live ? liveTextStream((t) => live.push(t)) : null
+  const stderrLive = live ? liveTextStream((t) => live.push(t)) : null
+  const endLive = () => {
+    stdoutLive?.end()
+    stderrLive?.end()
+    live?.end()
+  }
+  if (stdoutLive) child.stdout.on('data', (chunk: Buffer) => stdoutLive.write(chunk))
+  if (stderrLive) child.stderr.on('data', (chunk: Buffer) => stderrLive.write(chunk))
   let timedOut = false
   const timer = setTimeout(() => {
     timedOut = true
@@ -213,8 +316,8 @@ function runPwsh(command: string, timeoutSeconds: number, signal: AbortSignal, c
     clearTimeout(timer)
     signal.removeEventListener('abort', onAbort)
     const durationMs = Date.now() - startedAt
-    const stdout = Buffer.concat(stdoutSink.chunks).toString('utf8').trim().replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
-    const stderr = Buffer.concat(stderrSink.chunks).toString('utf8').trim().replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+    const stdout = stripAnsi(Buffer.concat(stdoutSink.chunks).toString('utf8')).trim()
+    const stderr = stripAnsi(Buffer.concat(stderrSink.chunks).toString('utf8')).trim()
     // 状态标记统一放正文前：退出码/超时/启动失败才决定 isError；
     // stderr 只标段不判失败（命令成功但程序往 stderr 打印很常见）
     const head: string[] = []
@@ -233,15 +336,28 @@ function runPwsh(command: string, timeoutSeconds: number, signal: AbortSignal, c
     if (body) head.push(clipMiddle(body, PWSH_MAX_OUTPUT_CHARS))
     resolve({ text: head.join('\n'), stdout, stderr, exitCode: timedOut || spawnError ? null : code, durationMs, timedOut })
   }
-  child.on('error', (err) => finish(null, err))
+  child.on('error', (err) => {
+    endLive()
+    finish(null, err)
+  })
   child.on('close', (code) => {
+    endLive()
     if (signal.aborted) reject(new Error('aborted'))
     else finish(code)
   })
   return promise
 }
 
-export async function executeTool(tc: ToolCall, signal: AbortSignal): Promise<ToolResult> {
+export async function executeTool(tc: ToolCall, signal: AbortSignal, onOutput?: (text: string) => void): Promise<ToolResult> {
+  if (tc.name === 'search') {
+    try {
+      const args = tc.arguments ? (JSON.parse(tc.arguments) as Record<string, unknown>) : {}
+      return await searchTool(args)
+    } catch (err) {
+      if (signal.aborted) throw err
+      return { text: `搜索失败: ${errMsg(err)}`, isError: true }
+    }
+  }
   if (tc.name === 'read') {
     try {
       const args = tc.arguments ? (JSON.parse(tc.arguments) as Record<string, unknown>) : {}
@@ -295,7 +411,7 @@ export async function executeTool(tc: ToolCall, signal: AbortSignal): Promise<To
       if ('error' in cwd) return { text: `工具执行失败: ${cwd.error}`, isError: true }
       const requested = Math.floor(Number(args.timeout))
       const timeoutSeconds = Number.isFinite(requested) && requested > 0 ? Math.min(requested, PWSH_MAX_TIMEOUT_S) : PWSH_DEFAULT_TIMEOUT_S
-      const r = await runPwsh(String(args.command ?? ''), timeoutSeconds, signal, cwd.dir)
+      const r = await runPwsh(String(args.command ?? ''), timeoutSeconds, signal, cwd.dir, onOutput)
       return {
         text: r.text,
         stdout: r.stdout,

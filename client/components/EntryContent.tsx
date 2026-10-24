@@ -4,6 +4,7 @@ import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { cn, hasVisibleText } from '@/lib/utils'
 import { showLightbox } from '@/components/Lightbox'
+import { SearchResultView } from '@/components/SearchResultView'
 import type { EditDiff, Entry } from '@/lib/types'
 
 // breaks=true 时单换行也渲染为 <br>（user/工具结果/思考保留原始换行）
@@ -26,7 +27,7 @@ export function markdownToPlain(text: string): string {
 
 // 可折叠文本块：默认折叠（preview=true 时露一行尾巴并跟随最后一行；false 时完全折叠只剩标题行）；
 // text 为原始文本：折叠预览原样展示（不走任何 markdown 格式化）；点击展开全文（流式输出时贴底跟随，用户上滚则暂停跟随）
-function CollapsibleText({ label, text, className, preview = true, error = false, previewText, tail = true, plain = false, nowrap = false, selectMode = false, subline }: { label: string; text: string; className?: string; preview?: boolean; error?: boolean; previewText?: string; tail?: boolean; plain?: boolean; nowrap?: boolean; selectMode?: boolean; subline?: string }) {
+function CollapsibleText({ label, text, className, preview = true, error = false, previewText, tail = true, plain = false, nowrap = false, selectMode = false, subline, previewClass }: { label: string; text: string; className?: string; preview?: boolean; error?: boolean; previewText?: string; tail?: boolean; plain?: boolean; nowrap?: boolean; selectMode?: boolean; subline?: string; previewClass?: string }) {
   const [open, setOpen] = useState(false)
   const bodyRef = useRef<HTMLDivElement>(null)
   const stuckBottom = useRef(true)
@@ -78,7 +79,7 @@ function CollapsibleText({ label, text, className, preview = true, error = false
               ? plain
                 ? cn('font-mono max-h-56', nowrap ? 'whitespace-pre overflow-auto' : 'whitespace-pre-wrap overflow-y-auto')
                 : cn('prose text-xs max-w-none dark:prose-invert max-h-56 overflow-y-auto code-wrap', error ? 'prose-destructive' : 'prose-muted')
-              : 'h-4 leading-4 whitespace-pre-wrap',
+              : (previewClass ?? 'h-4 leading-4 whitespace-pre-wrap'),
           )}
           dangerouslySetInnerHTML={open && !plain ? { __html: renderMarkdown(text, true) } : undefined}
         >
@@ -139,9 +140,6 @@ function DiffView({ diff }: { diff: EditDiff }) {
 // MCP 工具显示名：mcp__server__tool → server:tool（仅展示）
 const formatToolName = (name: string) => (name.startsWith('mcp__') ? name.replace(/^mcp__(.*?)__(.+)$/, '$1: $2') : name)
 
-// 流式接收参数时的进度文案（参数按字符计；大文件写入用 k 表示）
-const formatArgCount = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k 字符` : `${n} 字符`)
-
 // 工具调用参数 → 美化 JSON（能解析则格式化；流式中 JSON 未完整时按原文）
 const prettyArgs = (args: string) => {
   let body = args
@@ -174,17 +172,32 @@ export function EntryContent({
     )
   }
   if (entry.role === 'tool') {
+    // search 工具：渲染结构化的文件/行号/高亮结果（正文仍保留给模型与复制）
+    if (entry.search) return <SearchResultView result={entry.search} />
     const content = entry.content ?? ''
     // 带结构化 diff 时，正文里的 unified diff 只给模型；前端只显示首行摘要，避免重复
     const display = entry.diff ? content.split('\n')[0] : content
     const isMcpError = content.startsWith('(MCP 返回错误)') || content.startsWith('MCP 工具执行失败')
     // isError 由服务端工具结果给出（pwsh 非零退出/超时/启动失败、文件工具失败等）；兼容旧数据的 MCP 前缀
     const isError = isMcpError || entry.error === true
-    // hex dump 依赖列对齐，不能走 markdown（空白会被折叠）
+    // hex dump 依赖列对齐；read 文本是 cat -n（行号 + Tab），两者都不能走 markdown
     const isHexDump = content.startsWith('Offset(h)')
+    const isReadText = /^\s*\d+\t/.test(content)
+    const isPlain = isHexDump || isReadText
     return (
       <>
-        <CollapsibleText label="工具结果" text={display} error={isError} selectMode={selectMode} plain={isHexDump} nowrap={isHexDump} />
+        <CollapsibleText
+          label="工具结果"
+          text={display}
+          error={isError}
+          selectMode={selectMode}
+          // 实时输出期间按纯文本显示并多露几行（终端观感）；结束后回到一行预览
+          plain={isPlain || entry.live}
+          nowrap={isHexDump}
+          previewClass={entry.live ? 'h-24 leading-5 whitespace-pre-wrap' : undefined}
+          // 静态文件内容从开头展示，不贴底（pwsh/MCP 等流式结果保持贴底）
+          tail={!isPlain}
+        />
         {entry.diff && <DiffView diff={entry.diff} />}
         {entry.images?.map((url, i) => (
           <img key={i} src={url} className="mt-1.5 block max-h-50 max-w-50 rounded-lg object-cover cursor-zoom-in" alt="" onClick={() => showLightbox(url)} />
@@ -223,7 +236,7 @@ export function EntryContent({
             <CollapsibleText
               key={tc.id || tc.name}
               className="mt-1.5"
-              label={streaming ? `🔧 ${formatToolName(tc.name)} · 接收中 ${formatArgCount(tc.arguments.length)}` : `🔧 ${formatToolName(tc.name)}`}
+              label={`🔧 ${formatToolName(tc.name)}`}
               // 流式期间不解析 JSON（未完整的 JSON 反复 parse 是 O(n²)）；结束后再格式化一次
               text={generating ? tc.arguments || '(无参数)' : prettyArgs(tc.arguments)}
               previewText={preview}
