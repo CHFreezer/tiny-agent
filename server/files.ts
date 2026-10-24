@@ -26,7 +26,7 @@ const sha256 = (buf: Buffer) => createHash('sha256').update(buf).digest('hex')
 // 统一校验：raw[offset .. offset+old.length) 必须与 old 完全一致（sha256）
 function verifyOldBytes(raw: Buffer, offset: number, old: Buffer, label: string): void {
   if (offset < 0 || offset + old.length > raw.length) {
-    throw new Error(`${label} 超出文件末尾（文件 ${raw.length} 字节）`)
+    throw new Error(`${label} 起 ${old.length} 字节超出文件末尾（文件 ${raw.length} 字节）`)
   }
   if (sha256(raw.subarray(offset, offset + old.length)) !== sha256(old)) {
     throw new Error(`${label} 的原始字节 hash 与 old 不一致，拒绝编辑`)
@@ -42,6 +42,7 @@ export function readTool(args: { path?: unknown; encoding?: unknown; line?: unkn
   const encoding = normalizeEncoding(args.encoding)
   const hasOffset = args.offset !== undefined && args.offset !== null && args.offset !== ''
   const hasLine = args.line !== undefined && args.line !== null && args.line !== ''
+  const hasLimit = args.limit !== undefined && args.limit !== null && args.limit !== ''
   if (encoding === 'hex' && hasLine) return { text: '读取失败: hex 模式请用 offset，line 仅用于文本模式' }
   if (encoding !== 'hex' && hasOffset) return { text: '读取失败: 文本模式请用 line，offset 仅用于 hex 模式' }
   try {
@@ -75,8 +76,16 @@ export function readTool(args: { path?: unknown; encoding?: unknown; line?: unkn
     text = stripBomText(text, buf, spec)
     const lines = splitTextLines(text)
     const total = lines.length
-    const offset = Math.max(1, Math.floor(Number(args.line)) || 1)
-    const limit = Math.min(MAX_READ_LINES, Math.max(1, Math.floor(Number(args.limit)) || MAX_READ_LINES))
+    const lineValue = Number(args.line)
+    if (hasLine && (!Number.isInteger(lineValue) || lineValue < 1)) {
+      return { text: `读取失败: line 必须是 ≥1 的整数: ${String(args.line)}` }
+    }
+    const limitValue = Number(args.limit)
+    if (hasLimit && (!Number.isInteger(limitValue) || limitValue < 1)) {
+      return { text: `读取失败: limit 必须是 ≥1 的整数: ${String(args.limit)}` }
+    }
+    const offset = hasLine ? lineValue : 1
+    const limit = hasLimit ? Math.min(MAX_READ_LINES, limitValue) : MAX_READ_LINES
     if (total === 0) return { text: `(文件为空: ${abs})` }
     if (offset > total) return { text: `line=${offset} 超出范围（文件共 ${total} 行）: ${abs}` }
     const out: string[] = []
@@ -112,10 +121,24 @@ const clampLine = (line: string) => {
 
 // HxD 风格：Offset(h) + 16 字节/行 hex + ASCII（非可打印字节显示 .）
 function readHex(abs: string, size: number, args: { offset?: unknown; limit?: unknown }): ToolResult {
-  if (size === 0) return { text: `(文件为空: ${abs})` }
-  const parsedOffset = parseOffset(args.offset)
-  const offset = Number.isFinite(parsedOffset) && parsedOffset > 0 ? Math.floor(parsedOffset) : 0
-  const limit = Math.min(HEX_MAX_BYTES, Math.max(16, Math.floor(Number(args.limit)) || HEX_DEFAULT_BYTES))
+  const hasOffset = args.offset !== undefined && args.offset !== null && args.offset !== ''
+  const hasLimit = args.limit !== undefined && args.limit !== null && args.limit !== ''
+  const parsedOffset = hasOffset ? parseOffset(args.offset) : 0
+  if (hasOffset && (!Number.isFinite(parsedOffset) || parsedOffset < 0 || (typeof args.offset === 'number' && !Number.isInteger(args.offset)))) {
+    return { text: `读取失败: offset 必须是 ≥0 的整数（支持 0x）: ${String(args.offset)}` }
+  }
+  const limitValue = Number(args.limit)
+  if (hasLimit && (!Number.isInteger(limitValue) || limitValue < 1)) {
+    return { text: `读取失败: limit 必须是 ≥1 的整数: ${String(args.limit)}` }
+  }
+  const limit = hasLimit ? Math.min(HEX_MAX_BYTES, limitValue) : HEX_DEFAULT_BYTES
+  if (size === 0) {
+    const width = 8
+    return {
+      text: `${'Offset(h)'.padEnd(width + 3)}00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F  ASCII\n[共 0 字节 (0x0)，文件为空]`,
+    }
+  }
+  const offset = parsedOffset
   if (offset >= size) return { text: `offset=0x${offset.toString(16).toUpperCase()} 超出范围（文件共 ${size} 字节）: ${abs}` }
   const len = Math.min(limit, size - offset)
   const fd = fs.openSync(abs, 'r')
@@ -149,7 +172,7 @@ const encodeText = (text: string, encoding: string): Buffer => {
 }
 
 const parseHexValue = (v: unknown, name: string): Buffer => {
-  const cleaned = String(v ?? '').replace(/0x/gi, ' ').replace(/[\s,]/g, '')
+  const cleaned = String(v ?? '').replace(/[\s,]/g, '')
   if (!cleaned) return Buffer.alloc(0)
   if (!/^[0-9a-fA-F]+$/.test(cleaned)) throw new Error(`${name} 只能包含十六进制字节`)
   if (cleaned.length % 2) throw new Error(`${name} 的十六进制字符数必须是偶数（每字节两位）`)
@@ -273,6 +296,8 @@ const buildTextDiff = (file: string, oldRaw: Buffer, newRaw: Buffer, encoding: s
   }
   const oldMid = oldTokens.slice(p, so + 1)
   const newMid = newTokens.slice(p, sn + 1)
+  // util.diff 对两个空数组会抛 TypeError
+  if (!oldMid.length && !newMid.length) return { path: file, blocks: [] }
   let oldNo = p + 1
   let newNo = p + 1
 
@@ -455,21 +480,24 @@ function editText(
     if (!hasLine) {
       if (raw.length > 0) throw new Error(`${file}: 文件非空时插入需要 line；创建文件请用 write`)
       const next = encodeTextStrict(newText, resolveEncoding(encoding, Buffer.alloc(0)), file)
-      fs.writeFileSync(abs, next)
       const diff = buildTextDiff(file, raw, next, enc)
+      fs.writeFileSync(abs, next)
       return { text: `Edited ${file}\n${formatDiffText(diff)}`, diff }
     }
     if (!newText) throw new Error(`${file}: 插入需要提供 new 内容`)
     const { starts, bomLen, endsWithNewline } = textLineStarts(raw, enc)
     const lineCount = lineCountOfStarts(raw, bomLen, endsWithNewline, starts)
     const line = Math.floor(Number(args.line))
-    if (!Number.isFinite(line) || line < 1 || line > lineCount + 1) {
-      throw new Error(`${file}: line=${String(args.line)} 超出范围（1..${lineCount + 1}）`)
+    // 末尾没有换行符时，行数+1 不是真实行首，插入会与最后一行粘连
+    const maxLine = lineCount + (lineCount === 0 || endsWithNewline ? 1 : 0)
+    if (!Number.isFinite(line) || line < 1 || line > maxLine) {
+      const why = lineCount > 0 && !endsWithNewline && line === lineCount + 1 ? '；最后一行没有换行符' : ''
+      throw new Error(`${file}: line=${String(args.line)} 超出范围（1..${maxLine}）${why}`)
     }
     const at = line === lineCount + 1 ? raw.length : starts[line - 1]
     const next = Buffer.concat([raw.subarray(0, at), encodeTextStrict(newText, enc, file), raw.subarray(at)])
-    fs.writeFileSync(abs, next)
     const diff = buildTextDiff(file, raw, next, enc)
+    fs.writeFileSync(abs, next)
     return { text: `Edited ${file}\n${formatDiffText(diff)}`, diff }
   }
 
@@ -508,8 +536,8 @@ function editText(
   }
   parts.push(raw.subarray(last))
   const next = Buffer.concat(parts)
-  fs.writeFileSync(abs, next)
   const diff = buildTextDiff(file, raw, next, enc)
+  fs.writeFileSync(abs, next)
   return { text: `Edited ${file}\n${formatDiffText(diff)}`, diff }
 }
 
@@ -582,9 +610,9 @@ export function writeTool(args: { path?: unknown; content?: unknown; encoding?: 
     const content = String(args.content ?? '')
     // 新建文件不自动写 BOM；需要 BOM 请用 encoding:"hex" 显式写入
     const next = encodeTextStrict(content, resolveEncoding(encoding, Buffer.alloc(0)), file)
-    fs.writeFileSync(abs, next)
     const diff = buildTextDiff(file, Buffer.alloc(0), next, encoding)
-    return { text: `Created ${file}`, diff }
+    fs.writeFileSync(abs, next)
+    return diff.blocks.length ? { text: `Created ${file}`, diff } : { text: `Created ${file}` }
   } catch (err) {
     return { text: `写入失败: ${errMsg(err)}` }
   }

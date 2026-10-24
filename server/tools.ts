@@ -35,7 +35,7 @@ const EDIT_TOOL: OpenAI.Chat.ChatCompletionTool = {
   function: {
     name: 'edit',
     description: `修改现有文件（创建用 write）。
-文本：old 空/省略=插入（无 line 仅空文件；有 line 插到该行行首，换行需含在 new 中）；否则替换 old，new 空=删除；多处默认第一处，replace_all 全部；换行按输入原样匹配。
+文本：old 空/省略=插入（无 line 仅空文件；有 line 插到该行行首，new 需自带换行；行数+1=末尾，仅当文件以换行结尾）；否则替换 old，new 空=删除；多处默认第一处，replace_all 全部；换行按输入原样匹配。
 hex：offset 必填，old/new 为十六进制字节；old 空=插入，new 空=删除；replace_all、line 不可用。
 校验：文本按编码精确查找 old；hex 在 offset 处做 sha256 校验。路径相对 workspace 根目录。`,
     parameters: {

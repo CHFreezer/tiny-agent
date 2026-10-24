@@ -26,7 +26,7 @@ export function markdownToPlain(text: string): string {
 
 // 可折叠文本块：默认折叠（preview=true 时露一行尾巴并跟随最后一行；false 时完全折叠只剩标题行）；
 // text 为原始文本：折叠预览原样展示（不走任何 markdown 格式化）；点击展开全文（流式输出时贴底跟随，用户上滚则暂停跟随）
-function CollapsibleText({ label, text, className, preview = true, error = false, previewText, tail = true, plain = false, selectMode = false, subline }: { label: string; text: string; className?: string; preview?: boolean; error?: boolean; previewText?: string; tail?: boolean; plain?: boolean; selectMode?: boolean; subline?: string }) {
+function CollapsibleText({ label, text, className, preview = true, error = false, previewText, tail = true, plain = false, nowrap = false, selectMode = false, subline }: { label: string; text: string; className?: string; preview?: boolean; error?: boolean; previewText?: string; tail?: boolean; plain?: boolean; nowrap?: boolean; selectMode?: boolean; subline?: string }) {
   const [open, setOpen] = useState(false)
   const bodyRef = useRef<HTMLDivElement>(null)
   const stuckBottom = useRef(true)
@@ -76,7 +76,7 @@ function CollapsibleText({ label, text, className, preview = true, error = false
             'md-tight mt-1 break-words overflow-hidden',
             open
               ? plain
-                ? 'font-mono whitespace-pre-wrap max-h-56 overflow-y-auto'
+                ? cn('font-mono max-h-56', nowrap ? 'whitespace-pre overflow-auto' : 'whitespace-pre-wrap overflow-y-auto')
                 : cn('prose text-xs max-w-none dark:prose-invert max-h-56 overflow-y-auto code-wrap', error ? 'prose-destructive' : 'prose-muted')
               : 'h-4 leading-4 whitespace-pre-wrap',
           )}
@@ -173,9 +173,11 @@ export function EntryContent({
     // 带结构化 diff 时，正文里的 unified diff 只给模型；前端只显示首行摘要，避免重复
     const display = entry.diff ? content.split('\n')[0] : content
     const isMcpError = content.startsWith('(MCP 返回错误)') || content.startsWith('MCP 工具执行失败')
+    // hex dump 依赖列对齐，不能走 markdown（空白会被折叠）
+    const isHexDump = content.startsWith('Offset(h)')
     return (
       <>
-        <CollapsibleText label="工具结果" text={display} error={isMcpError} selectMode={selectMode} />
+        <CollapsibleText label="工具结果" text={display} error={isMcpError} selectMode={selectMode} plain={isHexDump} nowrap={isHexDump} />
         {entry.diff && <DiffView diff={entry.diff} />}
         {entry.images?.map((url, i) => (
           <img key={i} src={url} className="mt-1.5 block max-h-50 max-w-50 rounded-lg object-cover cursor-zoom-in" alt="" onClick={() => showLightbox(url)} />
