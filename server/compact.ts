@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { errMsg, readSettings } from './config.ts'
 import { saveSession } from './sessions.ts'
-import { buildChatRequest, getOpenAI } from './upstream.ts'
+import { buildChatRequest, getOpenAI, upstreamRequest } from './upstream.ts'
 import type { Entry, Session, Usage } from './types.ts'
 
 // ===== 自动上下文压缩 =====
@@ -75,7 +75,7 @@ export async function compactContext(session: Session, w: (o: unknown) => void, 
         extra: [{ role: 'user', content: SUMMARY_PROMPT }],
         createdAt: session.createdAt,
       }),
-      { signal },
+      upstreamRequest(signal),
     )
     for await (const chunk of stream) {
       if (signal.aborted) break
@@ -90,10 +90,12 @@ export async function compactContext(session: Session, w: (o: unknown) => void, 
   } catch (err) {
     if (!signal.aborted) streamErr = errMsg(err)
   }
-  // 输出被截断（length）/报错/空 → 失败：保留已输出内容展示，但不是有效分割点
-  const ok = !streamErr && finish !== 'length' && full.trim().length > 0
+  // 输出被截断（length）/报错/空/被用户停止 → 失败：保留已输出内容展示，但不是有效分割点。
+  // 停止时必须算失败：半截摘要若成为分割点，后续上下文会被静默截断成残缺摘要。
+  const aborted = signal.aborted
+  const ok = !aborted && !streamErr && finish !== 'length' && full.trim().length > 0
   entry.content = full || null
   if (!ok) entry.summaryStatus = 'failed'
   saveSession(session)
-  w({ m: { id: entry.id, ok, ...(ok ? {} : { err: streamErr ?? (finish === 'length' ? '摘要输出被截断，压缩失败' : '摘要生成失败') }) } })
+  w({ m: { id: entry.id, ok, ...(ok ? {} : { err: streamErr ?? (aborted ? '压缩已停止，摘要不完整' : finish === 'length' ? '摘要输出被截断，压缩失败' : '摘要生成失败') }) } })
 }

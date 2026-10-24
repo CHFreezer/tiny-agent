@@ -12,8 +12,25 @@ export interface Entry {
   tool_calls?: ToolCall[]
   tool_call_id?: string
   images?: string[]
+  diff?: EditDiff // edit 工具结果的结构化 diff（仅展示）
   summaryStatus?: 'failed' // 压缩摘要生成失败：不是有效分割点
   ts?: number // 创建时间（毫秒），前端显示相对时间
+}
+
+export interface DiffLine {
+  type: ' ' | '-' | '+' | '\\' // \ = 上一行缺少末尾换行（git 风格标记）
+  oldNo?: number
+  newNo?: number
+  text: string
+}
+export interface DiffBlock {
+  lines: DiffLine[]
+}
+export interface EditDiff {
+  path: string
+  kind?: 'hex'
+  offset?: string
+  blocks: DiffBlock[]
 }
 
 export interface Session {
@@ -35,6 +52,7 @@ export interface Settings {
   mcp: McpServerConfig[]
   maxContext: number // 最大上下文窗口 token，0=不限
   maxTokens: number // 最大输出 token，0=模型默认
+  headers: Record<string, string> // 上游自定义请求头（每行 Name: value），对所有 OpenAI 兼容请求生效
   pwsh: boolean // pwsh 工具开关
 }
 
@@ -62,5 +80,6 @@ export const DEFAULT_SETTINGS: Settings = {
   mcp: [],
   maxContext: 0,
   maxTokens: 0,
+  headers: {},
   pwsh: false,
 }

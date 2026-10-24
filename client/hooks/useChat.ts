@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { DEFAULT_SETTINGS, type Entry, type Session, type Settings, type ToolCall } from '@/lib/types'
+import { DEFAULT_SETTINGS, type EditDiff, type Entry, type Session, type Settings, type ToolCall } from '@/lib/types'
 import { fetchSessions, fetchSettings, putSettings, type SessionsData } from '@/lib/api'
 
 // 服务器是会话的唯一所有者：浏览器只发指令、只维护视图镜像
@@ -15,6 +15,7 @@ interface StreamEvent {
   t?: { i: number; id?: string; n?: string; a?: string }
   x?: string
   imgs?: string[]
+  diff?: EditDiff
   m?: { id: string; pos?: number; ok?: boolean; err?: string }
   tc?: string
   e?: string
@@ -58,7 +59,7 @@ interface ViewState {
 }
 const EMPTY_VIEW: ViewState = { genId: null, executingId: null, compacting: false }
 
-export interface ChatNotice {
+interface ChatNotice {
   title: string
   description?: string
   variant: 'info' | 'warning' | 'error'
@@ -233,7 +234,7 @@ export function useChat(effort: string, onError: (message: string) => void, onNo
             patchView(sessionId, { executingId: null, genId: m.x }) // 工具执行期间，生成索引位于工具结果条目
             const xid = m.x
             if (m.r !== undefined) {
-              patchEntry(sessionId, xid, { content: m.r, ...(m.imgs ? { images: m.imgs } : {}) })
+              patchEntry(sessionId, xid, { content: m.r, ...(m.imgs ? { images: m.imgs } : {}), ...(m.diff ? { diff: m.diff } : {}) })
             } else {
               const tc = m.tc ?? ''
               setHistoryFn(sessionId, (h) => {

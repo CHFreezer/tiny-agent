@@ -17,6 +17,16 @@ export function getOpenAI(base: string, apiKey = ''): OpenAI {
   return c
 }
 
+// 上游请求选项：只附加面板里显式配置的自定义请求头。
+// 不在代码里假设任何后端（如 OpenCode Go 的 x-opencode-session）——需要什么头由用户在设置里自行配置。
+export const upstreamRequest = (signal?: AbortSignal) => {
+  const headers = readSettings().headers ?? {}
+  return {
+    ...(signal ? { signal } : {}),
+    ...(Object.keys(headers).length ? { headers } : {}),
+  }
+}
+
 // 消息规范化：OpenAI 客户端在 content 为 null 且带 tool_calls 时按空串序列化，
 // 部分后端（vLLM/llama.cpp 等）不接受 assistant 空内容 → 补 ""
 export const normalizeMessage = (m: unknown): Record<string, unknown> => {
@@ -29,7 +39,7 @@ export const normalizeMessage = (m: unknown): Record<string, unknown> => {
 // 上下文分割点：最近一次成功的压缩气泡；其前历史（含更早压缩气泡）不计入当前上下文
 // 悬挂工具调用消毒：停止/崩溃后 assistant 可能带 tool_calls 而无（完整）tool 结果——上游会 400。
 // 结果缺失时丢弃 tool_calls（保留文本/思考）及配套的孤儿 tool 结果；整条变空壳则删除
-export function sanitizeToolCalls(msgs: Record<string, unknown>[]): Record<string, unknown>[] {
+function sanitizeToolCalls(msgs: Record<string, unknown>[]): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = []
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i]
@@ -54,6 +64,9 @@ export function sanitizeToolCalls(msgs: Record<string, unknown>[]): Record<strin
 
 export function toApiMessages(history: Entry[]) {
   const mapEntry = (m: Entry): Record<string, unknown>[] => {
+    // summary 只是客户端展示用的条目：唯一被选作分割点的摘要在下方以 assistant 注入，
+    // 其余（失败的、或位于分割点之后的）一律不发给上游——role: "summary" 不是合法 OpenAI role
+    if (m.role === 'summary') return []
     if (m.role === 'assistant' && m.tool_calls?.length) {
       const e: Record<string, unknown> = {
         role: 'assistant',

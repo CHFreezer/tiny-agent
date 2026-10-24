@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import OpenAI from 'openai'
 import { errMsg, readSettings } from './config.ts'
 import { sessions, saveSession } from './sessions.ts'
-import { buildChatRequest, getOpenAI } from './upstream.ts'
+import { buildChatRequest, getOpenAI, upstreamRequest } from './upstream.ts'
 import { executeTool } from './tools.ts'
 import { storeImage } from './images.ts'
 import { addUsage, compactContext } from './compact.ts'
@@ -38,7 +38,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
   const usage: Usage = { prompt: 0, completion: 0, total: 0 }
   let roundBase = 0 // 最近一次主请求的精确 prompt_tokens（上游分词器，usage 末尾 chunk）
   let lastCompletion = 0 // 最近一次主请求响应的精确 completion_tokens
-  for (let round = 0; !failed && !done; round++) {
+  while (!failed && !done) {
     // 当轮 assistant 条目：立即进入会话（服务器事实永远完整），断点/崩溃后也是合法半截
     const entry: Entry = { id: randomUUID(), role: 'assistant', content: '', ts: Date.now() }
     session.history.splice(pos, 0, entry)
@@ -83,13 +83,13 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
           history: session.history.slice(0, pos),
           createdAt: session.createdAt,
         }),
-        { signal: stallCtl.signal },
+        upstreamRequest(stallCtl.signal),
       )
       armStall()
-        for await (const chunk of stream) {
-          gotFirstChunk = true
-          armStall()
-          if (opts.signal.aborted) break
+      for await (const chunk of stream) {
+        gotFirstChunk = true
+        armStall()
+        if (opts.signal.aborted) break
         const delta = chunk.choices?.[0]?.delta as (OpenAI.Chat.ChatCompletionChunk.Choice.Delta & { reasoning_content?: string; reasoning?: string }) | undefined
         if (!delta) continue
         // 思考字段兼容：本地 llama.cpp 回 reasoning_content，commandcode 网关回 reasoning
@@ -153,13 +153,11 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
     }
     saveSession(session)
     if (failed) break
+    if (opts.signal.aborted) break
     // 气泡完成后检测压缩触发：上次请求的精确 prompt > 窗口 - max(20k, 最大输出)
-    if (s.maxContext > 0 && roundBase > 0 && roundBase > s.maxContext - Math.max(20000, s.maxTokens)) {
-      await compactContext(session, w, opts.signal, usage)
-      roundBase = 0 // 压缩后上下文已缩减，旧 prompt 值失效：防止本轮工具结果后二次触发压缩
-    }
-    if (opts.signal.aborted) break // 压缩期间停止：不进入工具轮（否则末尾多一个工具结果气泡）
+    const overLimit = s.maxContext > 0 && roundBase > 0 && roundBase > s.maxContext - Math.max(20000, s.maxTokens)
     if (!toolCalls.length) {
+      if (overLimit) await compactContext(session, w, opts.signal, usage)
       done = true
       break
     }
@@ -173,16 +171,18 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
         const r = await executeTool(tc, opts.signal)
         out = r.text
         if (r.images?.length) te.images = r.images.map((src) => storeImage(session.id, src))
+        if (r.diff) te.diff = r.diff
       } catch {
         out = '(已停止)'
       }
       te.content = out
       saveSession(session)
-      w({ x: te.id, r: out, tc: tc.id, ...(te.images ? { imgs: te.images } : {}) })
-      if (s.maxContext > 0 && roundBase > 0 && roundBase > s.maxContext - Math.max(20000, s.maxTokens)) {
-        await compactContext(session, w, opts.signal, usage)
-      }
+      w({ x: te.id, r: out, tc: tc.id, ...(te.images ? { imgs: te.images } : {}), ...(te.diff ? { diff: te.diff } : {}) })
     }
+    if (opts.signal.aborted) break
+    // 压缩必须等本轮所有工具结果落库之后：summary 若插在 assistant.tool_calls 与其工具结果之间，
+    // 下一轮以它为分割点会把 tool_calls 切掉，只剩孤儿的 tool 消息 → 上游 400
+    if (overLimit) await compactContext(session, w, opts.signal, usage)
     pos = session.history.length
   }
   if (opts.signal.aborted) {

@@ -13,7 +13,7 @@ import type { McpServerConfig } from './types.ts'
 const MCP_CONNECT_TIMEOUT = 20000 // 首次 npx 拉包较慢
 export const MCP_TOOL_TIMEOUT = 30000
 
-export interface McpEntry {
+interface McpEntry {
   cfg: McpServerConfig
   client?: Client
   transport?: StdioClientTransport

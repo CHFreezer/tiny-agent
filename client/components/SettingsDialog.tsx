@@ -1,4 +1,4 @@
-import { ChevronDown } from 'lucide-react'
+import { ChevronDown, Plus, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
@@ -19,6 +19,15 @@ import {
 import { scanModels } from '@/lib/api'
 import type { Settings } from '@/lib/types'
 
+// 请求头 UI 行：key/value 分开填写，id 只用于 React 列表稳定（删行后输入框不串位）
+interface HeaderRow {
+  id: number
+  key: string
+  value: string
+}
+// HTTP header 名允许的字符（RFC 7230 token）
+const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
+
 export function SettingsDialog({
   open,
   onOpenChange,
@@ -30,6 +39,9 @@ export function SettingsDialog({
   settings: Settings
   onSave: (next: Settings) => Promise<boolean>
 }) {
+  const headerSeq = useRef(0)
+  const makeHeaderRows = (h: Record<string, string>): HeaderRow[] =>
+    Object.entries(h).map(([key, value]) => ({ id: headerSeq.current++, key, value }))
   const [base, setBase] = useState(settings.baseUrl)
   const [mode, setMode] = useState(settings.mode)
   const [model, setModel] = useState(settings.model)
@@ -37,6 +49,7 @@ export function SettingsDialog({
   const [apiKey, setApiKey] = useState(settings.apiKey)
   const [maxContext, setMaxContext] = useState(settings.maxContext ? String(settings.maxContext) : '')
   const [maxTokens, setMaxTokens] = useState(settings.maxTokens ? String(settings.maxTokens) : '')
+  const [headerRows, setHeaderRows] = useState<HeaderRow[]>(() => makeHeaderRows(settings.headers))
   const [msg, setMsg] = useState('')
   const [modelOpen, setModelOpen] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -82,11 +95,30 @@ export function SettingsDialog({
       const n = Math.floor(Number(v))
       return Number.isFinite(n) && n > 0 ? n : 0
     }
-    const ok = await onSave({ ...settings, baseUrl: b, mode, model, effort: settings.effort, apiKey: apiKey.trim(), maxContext: toPosInt(maxContext), maxTokens: toPosInt(maxTokens) })
+    // 空行忽略；key 必须合法（值可为空）
+    const headers: Record<string, string> = {}
+    for (const r of headerRows) {
+      const k = r.key.trim()
+      const v = r.value.trim()
+      if (!k && !v) continue
+      if (!HEADER_NAME.test(k)) {
+        setMsg(k ? `请求头名称不合法：${k}` : '请求头名称不能为空')
+        setSaving(false)
+        return
+      }
+      headers[k] = v
+    }
+    const ok = await onSave({ ...settings, baseUrl: b, mode, model, effort: settings.effort, apiKey: apiKey.trim(), maxContext: toPosInt(maxContext), maxTokens: toPosInt(maxTokens), headers })
     setSaving(false)
     if (ok) onOpenChange(false)
     else setMsg('保存失败（服务器不可达？）')
   }
+
+  // 请求头行操作
+  const addHeader = () => setHeaderRows((rows) => [...rows, { id: headerSeq.current++, key: '', value: '' }])
+  const updateHeader = (id: number, field: 'key' | 'value', v: string) =>
+    setHeaderRows((rows) => rows.map((r) => (r.id === id ? { ...r, [field]: v } : r)))
+  const removeHeader = (id: number) => setHeaderRows((rows) => rows.filter((r) => r.id !== id))
 
   // 打开时从服务器设置同步（Dialog 的 onOpenChange 在 prop 驱动打开时不触发，故用 effect）
   useEffect(() => {
@@ -97,13 +129,14 @@ export function SettingsDialog({
       setApiKey(settings.apiKey)
       setMaxContext(settings.maxContext ? String(settings.maxContext) : '')
       setMaxTokens(settings.maxTokens ? String(settings.maxTokens) : '')
+      setHeaderRows(makeHeaderRows(settings.headers))
       setMsg('')
     }
   }, [open])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-md">
         <DialogHeader>
           <DialogTitle>服务器配置</DialogTitle>
           <DialogDescription>OpenAI 兼容接口，配置保存在服务器本地</DialogDescription>
@@ -128,6 +161,38 @@ export function SettingsDialog({
             API Key（Authorization，可选）
             <Input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="留空则不发送" spellCheck={false} />
           </label>
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-muted-foreground">自定义请求头（可选）</span>
+              <Button type="button" variant="outline" size="sm" onClick={addHeader}>
+                <Plus className="size-3.5" />
+                添加
+              </Button>
+            </div>
+            {headerRows.map((r) => (
+              <div key={r.id} className="flex items-center gap-2">
+                <Input
+                  value={r.key}
+                  onChange={(e) => updateHeader(r.id, 'key', e.target.value)}
+                  placeholder="Header 名称"
+                  spellCheck={false}
+                  className="flex-1 font-mono text-xs"
+                />
+                <Input
+                  value={r.value}
+                  onChange={(e) => updateHeader(r.id, 'value', e.target.value)}
+                  placeholder="值"
+                  spellCheck={false}
+                  className="flex-1 font-mono text-xs"
+                />
+                <Button type="button" variant="ghost" size="icon-sm" title="删除" onClick={() => removeHeader(r.id)}>
+                  <X className="size-4" />
+                </Button>
+              </div>
+            ))}
+            {headerRows.length === 0 && <span className="text-xs text-muted-foreground">暂无，点击「添加」新增一行</span>}
+            <span className="text-xs text-muted-foreground">对所有上游请求生效（需要额外鉴权/路由头时在此配置）</span>
+          </div>
           <label className="flex flex-col gap-1 text-sm text-muted-foreground">
             模型（可手填，或扫描后下拉选择）
             <div className="flex items-center gap-2">
