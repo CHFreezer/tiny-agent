@@ -27,6 +27,15 @@ const MIME_BY_EXT: Record<string, string> = {
   bmp: 'image/bmp',
 }
 
+// 图片元信息：发给上游用的 data URL + 格式/字节数/宽高（宽高解析失败时省略）
+export interface ImageInfo {
+  url: string
+  mime: string
+  bytes: number
+  width?: number
+  height?: number
+}
+
 const sessionDir = (sessionId: number) => path.join(SESSIONS_DIR, String(sessionId))
 
 // 图片名 → 磁盘路径；只认 <16位hex>.<白名单后缀>，从名字层面杜绝目录穿越
@@ -50,14 +59,80 @@ export function storeImage(sessionId: number, src: string): string {
   return `/api/sessions/${sessionId}/files/${name}`
 }
 
-// URL → data URL：仅转换本服务自己发的图片 URL，其他 URL 原样透传（上游可能自己会取）
-export function toDataUrl(src: string): string {
+// URL / data URL → 可发给上游的 data URL + 元信息（格式/字节数/宽高）
+export function imageInfo(src: string): ImageInfo {
   const m = URL_RE.exec(src)
-  if (!m) return src
-  const file = resolveImage(Number(m[1]), m[2])
-  if (!file) return src
-  const mime = MIME_BY_EXT[m[2].slice(m[2].lastIndexOf('.') + 1).toLowerCase()] ?? 'application/octet-stream'
-  return `data:${mime};base64,${fs.readFileSync(file).toString('base64')}`
+  if (m) {
+    const file = resolveImage(Number(m[1]), m[2])
+    if (!file) return { url: src, mime: 'application/octet-stream', bytes: 0 }
+    const buf = fs.readFileSync(file)
+    const mime = MIME_BY_EXT[m[2].slice(m[2].lastIndexOf('.') + 1).toLowerCase()] ?? 'application/octet-stream'
+    return { url: `data:${mime};base64,${buf.toString('base64')}`, mime, bytes: buf.length, ...dimensions(buf) }
+  }
+  const d = /^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i.exec(src)
+  if (d) {
+    const buf = Buffer.from(d[2], 'base64')
+    return { url: src, mime: d[1], bytes: buf.length, ...dimensions(buf) }
+  }
+  return { url: src, mime: 'application/octet-stream', bytes: 0 }
+}
+
+// URL → data URL：仅转换本服务自己发的图片 URL，其他 URL 原样透传（上游可能自己会取）
+export const toDataUrl = (src: string) => imageInfo(src).url
+
+// 只读格式头拿宽高：PNG / GIF / BMP / WebP / JPEG；解析失败返回 {}（不影响发图）
+function dimensions(buf: Buffer): { width?: number; height?: number } {
+  try {
+    // PNG：签名 + IHDR（宽高各 4 字节大端）
+    if (buf.length >= 24 && buf.readUInt32BE(0) === 0x89504e47 && buf.toString('ascii', 12, 16) === 'IHDR') {
+      return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) }
+    }
+    // GIF：逻辑屏幕宽高（小端 2 字节）
+    if (buf.length >= 10 && buf.toString('ascii', 0, 3) === 'GIF') {
+      return { width: buf.readUInt16LE(6), height: buf.readUInt16LE(8) }
+    }
+    // BMP：宽高为小端 int32（高度可能为负，表示自上而下）
+    if (buf.length >= 26 && buf.toString('ascii', 0, 2) === 'BM') {
+      return { width: Math.abs(buf.readInt32LE(18)), height: Math.abs(buf.readInt32LE(22)) }
+    }
+    // WebP：RIFF....WEBP，按首个 chunk 的布局解析（VP8X / VP8 / VP8L）
+    if (buf.length >= 30 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') {
+      const chunk = buf.toString('ascii', 12, 16)
+      if (chunk === 'VP8X') return { width: 1 + buf.readUIntLE(24, 3), height: 1 + buf.readUIntLE(27, 3) }
+      if (chunk === 'VP8 ') return { width: buf.readUInt16LE(26) & 0x3fff, height: buf.readUInt16LE(28) & 0x3fff }
+      if (chunk === 'VP8L') {
+        const b0 = buf[21], b1 = buf[22], b2 = buf[23], b3 = buf[24]
+        return { width: 1 + (((b1 & 0x3f) << 8) | b0), height: 1 + (((b3 & 0x0f) << 10) | (b2 << 2) | (b1 >> 6)) }
+      }
+    }
+    // JPEG：扫描 SOF 段（排除 DHT/JPG/DAC）
+    if (buf.length >= 4 && buf[0] === 0xff && buf[1] === 0xd8) {
+      let i = 2
+      while (i + 9 < buf.length) {
+        if (buf[i] !== 0xff) {
+          i++
+          continue
+        }
+        const marker = buf[i + 1]
+        if (marker === 0xff) {
+          i++
+          continue
+        }
+        if (marker === 0xd8 || marker === 0xd9 || (marker >= 0xd0 && marker <= 0xd7)) {
+          i += 2
+          continue
+        }
+        const len = buf.readUInt16BE(i + 2)
+        const isSof = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc
+        if (isSof) return { width: buf.readUInt16BE(i + 7), height: buf.readUInt16BE(i + 5) }
+        if (len < 2) break
+        i += 2 + len
+      }
+    }
+  } catch {
+    // 头部不完整/格式异常：忽略元信息
+  }
+  return {}
 }
 
 // 清理不再被任何条目引用的图片（saveSession 后调用）

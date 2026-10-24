@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ChevronRight } from 'lucide-react'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
-import { cn } from '@/lib/utils'
+import { cn, hasVisibleText } from '@/lib/utils'
 import { showLightbox } from '@/components/Lightbox'
 import type { EditDiff, Entry } from '@/lib/types'
 
@@ -39,7 +39,7 @@ function CollapsibleText({ label, text, className, preview = true, error = false
       return
     }
     if (!open || stuckBottom.current) el.scrollTop = el.scrollHeight
-  }, [text, open, tail])
+  }, [text, previewText, open, tail])
 
   return (
     <div
@@ -139,6 +139,9 @@ function DiffView({ diff }: { diff: EditDiff }) {
 // MCP 工具显示名：mcp__server__tool → server:tool（仅展示）
 const formatToolName = (name: string) => (name.startsWith('mcp__') ? name.replace(/^mcp__(.*?)__(.+)$/, '$1: $2') : name)
 
+// 流式接收参数时的进度文案（参数按字符计；大文件写入用 k 表示）
+const formatArgCount = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k 字符` : `${n} 字符`)
+
 // 工具调用参数 → 美化 JSON（能解析则格式化；流式中 JSON 未完整时按原文）
 const prettyArgs = (args: string) => {
   let body = args
@@ -154,10 +157,12 @@ const prettyArgs = (args: string) => {
 export function EntryContent({
   entry,
   executing,
+  generating,
   selectMode = false,
 }: {
   entry: Entry
   executing?: boolean
+  generating?: boolean
   selectMode?: boolean
 }) {
   if (entry.role === 'system') {
@@ -173,11 +178,13 @@ export function EntryContent({
     // 带结构化 diff 时，正文里的 unified diff 只给模型；前端只显示首行摘要，避免重复
     const display = entry.diff ? content.split('\n')[0] : content
     const isMcpError = content.startsWith('(MCP 返回错误)') || content.startsWith('MCP 工具执行失败')
+    // isError 由服务端工具结果给出（pwsh 非零退出/超时/启动失败、文件工具失败等）；兼容旧数据的 MCP 前缀
+    const isError = isMcpError || entry.error === true
     // hex dump 依赖列对齐，不能走 markdown（空白会被折叠）
     const isHexDump = content.startsWith('Offset(h)')
     return (
       <>
-        <CollapsibleText label="工具结果" text={display} error={isMcpError} selectMode={selectMode} plain={isHexDump} nowrap={isHexDump} />
+        <CollapsibleText label="工具结果" text={display} error={isError} selectMode={selectMode} plain={isHexDump} nowrap={isHexDump} />
         {entry.diff && <DiffView diff={entry.diff} />}
         {entry.images?.map((url, i) => (
           <img key={i} src={url} className="mt-1.5 block max-h-50 max-w-50 rounded-lg object-cover cursor-zoom-in" alt="" onClick={() => showLightbox(url)} />
@@ -201,15 +208,31 @@ export function EntryContent({
   if (entry.role === 'assistant') {
     return (
       <>
-        {entry.reasoning && (
+        {hasVisibleText(entry.reasoning) && (
           <CollapsibleText className="mb-2" label="思考" text={entry.reasoning} selectMode={selectMode} />
         )}
-        {entry.content && (
+        {hasVisibleText(entry.content) && (
           <div className="prose prose-sm max-w-none dark:prose-invert" dangerouslySetInnerHTML={{ __html: renderMarkdown(entry.content) }} />
         )}
-        {entry.tool_calls?.map((tc) => (
-          <CollapsibleText key={tc.id || tc.name} className="mt-1.5" label={`🔧 ${formatToolName(tc.name)}`} text={prettyArgs(tc.arguments)} previewText={tc.arguments} tail={false} plain selectMode={selectMode} />
-        ))}
+        {entry.tool_calls?.map((tc) => {
+          // 流式接收参数：跟随尾部滚动 + 实时字符数，避免大参数看起来像卡死；
+          // 折叠预览只保留末尾一段，别把整段 JSON 塞进 DOM
+          const streaming = generating === true && tc.arguments.length > 0
+          const preview = streaming && tc.arguments.length > 1200 ? tc.arguments.slice(-1200) : tc.arguments
+          return (
+            <CollapsibleText
+              key={tc.id || tc.name}
+              className="mt-1.5"
+              label={streaming ? `🔧 ${formatToolName(tc.name)} · 接收中 ${formatArgCount(tc.arguments.length)}` : `🔧 ${formatToolName(tc.name)}`}
+              // 流式期间不解析 JSON（未完整的 JSON 反复 parse 是 O(n²)）；结束后再格式化一次
+              text={generating ? tc.arguments || '(无参数)' : prettyArgs(tc.arguments)}
+              previewText={preview}
+              tail={generating === true}
+              plain
+              selectMode={selectMode}
+            />
+          )
+        })}
         {executing && <div className="mt-1.5 rounded-md bg-muted px-2.5 py-1.5 font-mono text-xs">⏳ 执行中…</div>}
       </>
     )
@@ -217,7 +240,7 @@ export function EntryContent({
   // user
   return (
     <>
-      {entry.content && (
+      {hasVisibleText(entry.content) && (
         <div className="bubble-user prose prose-sm max-w-none" dangerouslySetInnerHTML={{ __html: renderMarkdown(entry.content, true) }} />
       )}
       {entry.images?.map((url, i) => (

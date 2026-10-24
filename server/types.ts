@@ -13,6 +13,7 @@ export interface Entry {
   tool_call_id?: string
   images?: string[] // 图片 URL（/api/sessions/<id>/files/<名>，前端 <img src> 直接用；发上游前读回 data URL）
   diff?: EditDiff // edit 工具的结构化 diff（仅前端展示，不发给上游）
+  error?: boolean // 工具结果失败（前端标红；仅展示，不发给上游）
   summaryStatus?: 'failed' // 压缩摘要生成失败（截断/报错）：不是有效分割点
   ts?: number // 创建时间（毫秒），前端显示相对时间
 }
@@ -60,8 +61,15 @@ export interface Settings {
 }
 export interface ToolResult {
   text: string
-  images?: string[] // data URL：工具结果随上下文注入（read_image），服务端落盘后条目录 URL
+  images?: string[] // data URL：工具结果随上下文注入（read_image / MCP image content），服务端落盘后条目录 URL
   diff?: EditDiff // 结构化编辑 diff（仅前端展示）
+  isError?: boolean // 工具失败（前端标红；回给模型的文本不变）
+  // pwsh 执行元数据：stdout/stderr 分开保留，text 是回给模型的合成文本（其它工具不填）
+  exitCode?: number | null // null = 超时或启动失败，没有可信退出码
+  stdout?: string
+  stderr?: string
+  durationMs?: number
+  timedOut?: boolean
 }
 // 上游真实 token 用量（stream_options.include_usage 的末尾 chunk）
 export interface Usage {

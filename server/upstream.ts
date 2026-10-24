@@ -1,7 +1,7 @@
 import OpenAI from 'openai'
 import { readMemories } from './memories.ts'
 import { currentTools } from './tools.ts'
-import { toDataUrl } from './images.ts'
+import { imageInfo, toDataUrl } from './images.ts'
 import { readSettings } from './config.ts'
 import type { Entry } from './types.ts'
 
@@ -86,14 +86,8 @@ export function toApiMessages(history: Entry[]) {
       return [e]
     }
     if (m.role === 'tool') {
-      const out: Record<string, unknown>[] = [{ role: 'tool', tool_call_id: m.tool_call_id, content: m.content }]
-      // 带图工具结果（read_image）：tool 消息只能是文本，图片以紧随的 user 消息注入
-      if (m.images?.length) {
-        const content: Array<Record<string, unknown>> = [{ type: 'text', text: '以下是读取的图片：' }]
-        for (const url of m.images) content.push({ type: 'image_url', image_url: { url: toDataUrl(url) } })
-        out.push({ role: 'user', content })
-      }
-      return out
+      // tool 消息只能放文本；图片由 mapEntries 在整轮 tool 结果之后合并成一条 user 消息
+      return [{ role: 'tool', tool_call_id: m.tool_call_id, content: m.content }]
     }
     if (m.role === 'assistant' && m.reasoning) {
       return [{ role: 'assistant', content: m.content, reasoning_content: m.reasoning, reasoning: m.reasoning }]
@@ -106,6 +100,40 @@ export function toApiMessages(history: Entry[]) {
     }
     return [{ role: m.role, content: m.content }]
   }
+
+  // 工具结果图片：OpenAI Chat Completions 的 tool 消息只支持文本，图片必须以 user 消息注入。
+  // 同一条 assistant 的连续 tool 结果必须保持相邻，所以图片先收集，整轮结束后再合并成一条 user，
+  // 避免插在 tool 消息之间导致 sanitizeToolCalls 误判"缺少工具结果"并丢弃整条 tool_calls。
+  const imageLabel = (entry: Entry, info: ReturnType<typeof imageInfo>) => {
+    const size = info.width && info.height ? `${info.width}×${info.height}` : '尺寸未知'
+    const bytes = info.bytes > 0 ? `，${info.bytes} 字节` : ''
+    return `[工具结果图片] tool_call_id=${entry.tool_call_id ?? '?'}；${info.mime}；${size}${bytes}`
+  }
+  const mapEntries = (entries: Entry[]): Record<string, unknown>[] => {
+    const out: Record<string, unknown>[] = []
+    let pending: Record<string, unknown>[] = []
+    const flush = () => {
+      if (!pending.length) return
+      out.push({ role: 'user', content: pending })
+      pending = []
+    }
+    for (const entry of entries) {
+      if (entry.role === 'tool') {
+        out.push(...mapEntry(entry))
+        for (const src of entry.images ?? []) {
+          const info = imageInfo(src)
+          pending.push({ type: 'text', text: imageLabel(entry, info) })
+          pending.push({ type: 'image_url', image_url: { url: info.url } })
+        }
+        continue
+      }
+      flush()
+      out.push(...mapEntry(entry))
+    }
+    flush()
+    return out
+  }
+
   let sumIdx = -1
   for (let i = history.length - 1; i >= 0; i--) {
     if (history[i].role === 'summary' && !history[i].summaryStatus) {
@@ -114,7 +142,7 @@ export function toApiMessages(history: Entry[]) {
     }
   }
   if (sumIdx < 0) {
-    return sanitizeToolCalls(history.filter((m) => !(m.role === 'system' && !m.content?.trim())).flatMap(mapEntry))
+    return sanitizeToolCalls(mapEntries(history.filter((m) => !(m.role === 'system' && !m.content?.trim()))))
   }
   const msgs: Record<string, unknown>[] = []
   for (const m of history.slice(0, sumIdx)) {
@@ -122,7 +150,7 @@ export function toApiMessages(history: Entry[]) {
   }
   msgs.push({ role: 'user', content: 'What did we do so far?' })
   msgs.push({ role: 'assistant', content: history[sumIdx].content ?? '' })
-  for (const m of history.slice(sumIdx + 1)) msgs.push(...mapEntry(m))
+  msgs.push(...mapEntries(history.slice(sumIdx + 1)))
   msgs.push({ role: 'user', content: '从这里继续调用工具或者给出答案' })
   return sanitizeToolCalls(msgs)
 }

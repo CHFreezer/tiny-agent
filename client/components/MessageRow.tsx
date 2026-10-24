@@ -5,7 +5,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { EntryContent, markdownToPlain } from '@/components/EntryContent'
 import { EditForm } from '@/components/EditForm'
-import { cn } from '@/lib/utils'
+import { cn, hasVisibleText } from '@/lib/utils'
 import type { Entry } from '@/lib/types'
 
 // 相对时间：<1分钟→秒，<1小时→分钟，<1天→时/分/秒，≥1天→年月日时分秒
@@ -74,8 +74,9 @@ export function MessageRow({
         : entry.role === 'summary'
           ? 'border-0 bg-transparent shadow-none px-0 py-1 max-w-full'
     : 'border border-border bg-card text-foreground max-w-[85%]'
-  // 完全空的条目（无正文/思考/工具调用）不渲染气泡壳
-  const isEmpty = !entry.content && !entry.reasoning && !entry.tool_calls?.length
+  // 完全空的条目（无可见正文/思考/工具调用/图片）不渲染气泡壳。
+  // 用 hasVisibleText：上游可能在首个真实 token 前先流出空格/换行/零宽空格，不能让它把空气泡撑满宽度
+  const isEmpty = !hasVisibleText(entry.content) && !hasVisibleText(entry.reasoning) && !entry.tool_calls?.length && !entry.images?.length
 
   return (
     <div className={cn('group flex flex-col gap-1', entry.role === 'user' ? 'items-end' : entry.role === 'summary' ? 'items-center' : 'items-stretch')}>
@@ -85,8 +86,9 @@ export function MessageRow({
         className={cn(
           'relative rounded-xl px-3.5 py-2.5 text-sm leading-relaxed break-words shadow-sm',
           bubbleClass,
-          // 生成中的空条目：气泡收缩到内容宽（只包住指示器），避免满宽空气泡
-          isEmpty && generating && entry.role !== 'summary' && (entry.role === 'user' ? 'self-end' : 'self-start'),
+          // 生成中的空条目：气泡收缩到内容宽（只包住指示器），避免满宽空气泡。
+          // w-fit 兜底：即使父级 align-items 或内容里有不可见空白，也不会被拉宽
+          isEmpty && generating && entry.role !== 'summary' && (entry.role === 'user' ? 'self-end w-fit' : 'self-start w-fit'),
           selected && 'ring-2 ring-primary/60',
           selectMode && 'cursor-pointer',
         )}
@@ -121,11 +123,11 @@ export function MessageRow({
             onCancel={() => setEditing(false)}
           />
         ) : (
-          <EntryContent entry={entry} executing={executing} selectMode={selectMode} />
+          <EntryContent entry={entry} executing={executing} generating={generating} selectMode={selectMode} />
         )}
         {generating && (
           // 生成索引指示：常驻气泡内，相对气泡居中
-          <div className="flex justify-center gap-1 pt-2">
+          <div className="flex w-full justify-center gap-1 pt-2">
             <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/60" />
             <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/60 [animation-delay:0.15s]" />
             <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/60 [animation-delay:0.3s]" />

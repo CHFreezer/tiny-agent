@@ -85,9 +85,11 @@ npm run dev:server -- --data-dir <数据目录路径>  # 仅 server
 - **write**：创建新文件（目标已存在则失败，修改用 edit）；`content` 为内容，`encoding` 默认 utf-8（可传 gbk/shift_jis 等），`encoding:"hex"` 时按十六进制字节写入；自动创建父目录；新建文件不写 BOM（需要 BOM 用 hex 显式写入）
 - **read**：读取文件。`encoding` 默认 `utf-8`，按 cat -n 风格返回文本（行号右对齐 6 位 + Tab）。文本模式用 `line`（1-based 起始行，默认 1）+ `limit`（行数）；`encoding:"hex"` 用 `offset`（0-based 字节偏移，支持 0x）+ `limit`（字节数）以 HxD 风格查看二进制。也可指定 `gbk`/`gb18030`/`big5`/`big5-hkscs`/`shift_jis`/`cp932`/`euc-jp`/`euc-kr`/`cp949`/`utf-16le/be`/`utf-32le/be` 等文本编码（行号按编码的 code unit 对齐计算；TextDecoder 不支持的标签回退 iconv），或 `encoding:"hex"` 以 HxD 风格查看二进制（绝对地址 + 16 字节/行 hex + ASCII，按字节分页）
 - **edit**：修改现有文件（创建用 write）。文本模式：`old` 为要替换的原文（可为行内片段/多行，按字节精确匹配，LF/CRLF 不做转换），`new` 空=删除；`replace_all` 默认只替换第一处；`line` 可选（1-based），替换时作为查找起点。`old` 空/省略=插入：不填 `line` 仅可写空文件，填 `line` 则把 `new` 原样插入该行行首（行号+1=末尾，且文件末尾必须已有换行；`new` 需自带换行）。文本用 `line`，hex 用 `offset`（0-based 字节，支持 0x，必填）；hex 模式 `old`/`new` 为十六进制字节，按 sha256 校验原始字节，`replace_all` 不可用。编辑后附带的 diff 与前端同一份，行号按 git/read 语义（末尾换行不算额外一行），行尾符参与比较，末行缺少换行时追加 git 风格的 No newline 标记。
-- **pwsh**：在本地执行 PowerShell 7 命令（设置页可开关）；工作目录 `data/workspace`
-- **read_image**：读取本机图片（≤20MB）注入上下文；相对路径基于 `data/workspace`
-- **MCP 插件**：设置页配置 `command + args + env`，官方 `@modelcontextprotocol/sdk` stdio 传输；工作目录 `data/workspace`（与内置工具共享，TEMP 重定向到其 `tmp/`）；工具名加 `mcp__<插件>__` 前缀；20s 连接超时（首次 npx 拉包较慢）、30s 工具超时；服务器退出时按进程树清理（Windows `taskkill /T`）
+- **pwsh**：在本地执行 PowerShell 7 命令（设置页可开关）；默认工作目录 `data/workspace`（可用 `cwd` 覆盖）。默认 30s 超时（`timeout` 可调，上限 600s）。结果回给模型时带状态标记：`[退出码 N]` / `[超时]` / `[启动失败]` / `[进程被终止]`；stdout/stderr 分开捕获，stderr 非空时按 `[stdout]` / `[stderr]` 分段（两条管道无法还原交错顺序）。输出超过 10000 字符时保留开头 2000 + 结尾 8000，中间标注省略量；捕获窗口 1MB（更早的字节丢弃）。工具结果同时带 `isError`（非零退出/超时/启动失败），前端标红
+- **read_image**：读取本机图片（≤20MB）注入上下文；相对路径基于 `cwd`（默认 `data/workspace`）
+- **图片注入**：OpenAI Chat Completions 的 tool 消息只能放文本，所以工具结果里的图片会在该轮所有 tool 消息之后合并成一条 user 消息注入（带 `tool_call_id` / 格式 / 宽高 / 字节数标签）；`read_image` 与 MCP 工具返回的 image content（如 Playwright 截图）走同一条路径
+- **cwd**：内置工具 `read` / `edit` / `write` / `read_image` / `pwsh` 均支持 `cwd` 参数覆盖工作目录，必须是已存在的目录（不存在或不是目录直接报错）；相对 `cwd` 基于 `data/workspace`，省略时仍为 `data/workspace`。文件工具的相对路径基于该 `cwd`，`pwsh` 以它为进程工作目录。MCP 工具的参数由插件定义，不支持该参数
+- **MCP 插件**：设置页配置 `command + args + env`，官方 `@modelcontextprotocol/sdk` stdio 传输；工作目录 `data/workspace`（与内置工具共享，TEMP 重定向到其 `tmp/`）；工具名加 `mcp__<插件>__` 前缀；20s 连接超时（首次 npx 拉包较慢）、30s 工具超时；服务器退出时按进程树清理（Windows `taskkill /T`）；文本结果超过 8000 字符时保留首尾并标注省略，`isError` 结果前端标红
 
 ## TTS
 

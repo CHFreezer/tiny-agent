@@ -16,6 +16,7 @@ interface StreamEvent {
   x?: string
   imgs?: string[]
   diff?: EditDiff
+  err?: boolean // 工具结果失败（x 带 r 时下发；前端标红）
   m?: { id: string; pos?: number; ok?: boolean; err?: string }
   tc?: string
   e?: string
@@ -234,7 +235,7 @@ export function useChat(effort: string, onError: (message: string) => void, onNo
             patchView(sessionId, { executingId: null, genId: m.x }) // 工具执行期间，生成索引位于工具结果条目
             const xid = m.x
             if (m.r !== undefined) {
-              patchEntry(sessionId, xid, { content: m.r, ...(m.imgs ? { images: m.imgs } : {}), ...(m.diff ? { diff: m.diff } : {}) })
+              patchEntry(sessionId, xid, { content: m.r, ...(m.imgs ? { images: m.imgs } : {}), ...(m.diff ? { diff: m.diff } : {}), ...(m.err ? { error: true } : {}) })
             } else {
               const tc = m.tc ?? ''
               setHistoryFn(sessionId, (h) => {

@@ -172,12 +172,13 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
         out = r.text
         if (r.images?.length) te.images = r.images.map((src) => storeImage(session.id, src))
         if (r.diff) te.diff = r.diff
+        if (r.isError) te.error = true
       } catch {
         out = '(已停止)'
       }
       te.content = out
       saveSession(session)
-      w({ x: te.id, r: out, tc: tc.id, ...(te.images ? { imgs: te.images } : {}), ...(te.diff ? { diff: te.diff } : {}) })
+      w({ x: te.id, r: out, tc: tc.id, ...(te.images ? { imgs: te.images } : {}), ...(te.diff ? { diff: te.diff } : {}), ...(te.error ? { err: true } : {}) })
     }
     if (opts.signal.aborted) break
     // 压缩必须等本轮所有工具结果落库之后：summary 若插在 assistant.tool_calls 与其工具结果之间，
