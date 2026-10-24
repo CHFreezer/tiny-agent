@@ -5,14 +5,78 @@ import OpenAI from 'openai'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { WORKSPACE_DIR, errMsg, readSettings } from './config.ts'
 import { MCP_TOOL_TIMEOUT, mcpToolMap, mcpTools } from './mcp.ts'
+import { editTool, readTool, writeTool } from './files.ts'
 import type { ToolCall, ToolResult } from './types.ts'
 
 // 内置工具（OpenAI function calling 格式）
-export const PWSH_TOOL: OpenAI.Chat.ChatCompletionTool = {
+const READ_TOOL: OpenAI.Chat.ChatCompletionTool = {
+  type: 'function',
+  function: {
+    name: 'read',
+    description: `读取文件。encoding 默认 "utf-8"；encoding:"hex" 为十六进制模式（地址 + 16 字节/行 + ASCII）。
+- 文本：line = 起始行（1-based，默认 1），limit = 行数（默认/上限 2000）；输出 cat -n 风格（行号右对齐 + Tab），行号不要复制进 old
+- hex：offset = 字节偏移（0-based，支持 0x），limit = 字节数（默认 1024，上限 4096）
+编码支持 iconv-lite 标签。路径相对 workspace 根目录（也支持绝对路径）。`,
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: '文件路径' },
+        encoding: { type: 'string', description: '文本编码（默认 utf-8）或 "hex"' },
+        line: { type: 'number', description: '文本：起始行（1-based，默认 1）' },
+        offset: { type: ['number', 'string'], description: 'hex：字节偏移（0-based，支持 0x）' },
+        limit: { type: 'number', description: '文本=行数；hex=字节数' },
+      },
+      required: ['path'],
+    },
+  },
+}
+const EDIT_TOOL: OpenAI.Chat.ChatCompletionTool = {
+  type: 'function',
+  function: {
+    name: 'edit',
+    description: `修改现有文件（创建用 write）。
+文本：old 空/省略=插入（无 line 仅空文件；有 line 插到该行行首，换行需含在 new 中）；否则替换 old，new 空=删除；多处默认第一处，replace_all 全部；换行按输入原样匹配。
+hex：offset 必填，old/new 为十六进制字节；old 空=插入，new 空=删除；replace_all、line 不可用。
+校验：文本按编码精确查找 old；hex 在 offset 处做 sha256 校验。路径相对 workspace 根目录。`,
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: '文件路径' },
+        old: { type: 'string', description: '原文；空/省略=插入' },
+        new: { type: 'string', description: '替换内容；空=删除' },
+        encoding: { type: 'string', description: '文本编码（默认 utf-8）或 "hex"' },
+        replace_all: { type: 'boolean', description: '全部匹配替换' },
+        line: { type: 'number', description: '插入行号或查找起点（1-based）' },
+        offset: { type: ['number', 'string'], description: 'hex：字节偏移（0-based，支持 0x）' },
+      },
+      required: ['path', 'new'],
+    },
+  },
+}
+const WRITE_TOOL: OpenAI.Chat.ChatCompletionTool = {
+  type: 'function',
+  function: {
+    name: 'write',
+    description: `创建新文件（已存在则失败；修改用 edit），自动建父目录。
+- content：内容；encoding 默认 "utf-8"，encoding:"hex" 时为十六进制字节
+- 不写 BOM（需要 BOM 用 hex 显式写入）
+路径相对 workspace 根目录（也支持绝对路径）。`,
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: '文件路径' },
+        content: { type: 'string', description: '内容；hex 模式为十六进制字节' },
+        encoding: { type: 'string', description: '文本编码（默认 utf-8）或 "hex"' },
+      },
+      required: ['path', 'content'],
+    },
+  },
+}
+const PWSH_TOOL: OpenAI.Chat.ChatCompletionTool = {
   type: 'function',
   function: {
     name: 'pwsh',
-    description: `在本地机器上执行 PowerShell 7（pwsh.exe）命令并返回输出，可用于系统查询、文件操作等。工作目录：${WORKSPACE_DIR}（相对路径文件操作落在这里）`,
+    description: `在本地机器上执行 PowerShell 7（pwsh.exe）命令并返回输出，可用于系统查询、文件操作等。工作目录为 workspace 根目录（相对路径基于它）。`,
     parameters: {
       type: 'object',
       properties: {
@@ -23,15 +87,15 @@ export const PWSH_TOOL: OpenAI.Chat.ChatCompletionTool = {
     },
   },
 }
-export const READ_IMAGE_TOOL: OpenAI.Chat.ChatCompletionTool = {
+const READ_IMAGE_TOOL: OpenAI.Chat.ChatCompletionTool = {
   type: 'function',
   function: {
     name: 'read_image',
-    description: `读取本机图片文件（png/jpg/webp/gif）并让模型看到图片内容（例如其他工具或脚本截图落盘后的文件）。工作目录：${WORKSPACE_DIR}`,
+    description: `读取本机图片文件（png/jpg/webp/gif）并让模型看到图片内容（例如其他工具或脚本截图落盘后的文件）。路径相对 workspace 根目录（也支持绝对路径）。`,
     parameters: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: `图片文件路径（相对路径基于工作目录 ${WORKSPACE_DIR}）` },
+        path: { type: 'string', description: `图片文件路径（相对 workspace 根目录）` },
       },
       required: ['path'],
     },
@@ -40,7 +104,7 @@ export const READ_IMAGE_TOOL: OpenAI.Chat.ChatCompletionTool = {
 
 // 当前工具集（与生成请求同源）：生成循环与压缩请求共用
 export function currentTools(): OpenAI.Chat.ChatCompletionTool[] {
-  return [...(readSettings().pwsh ? [PWSH_TOOL] : []), READ_IMAGE_TOOL, ...mcpTools()]
+  return [...(readSettings().pwsh ? [PWSH_TOOL] : []), READ_TOOL, EDIT_TOOL, WRITE_TOOL, READ_IMAGE_TOOL, ...mcpTools()]
 }
 
 // ===== 工具执行（服务器侧） =====
@@ -123,6 +187,33 @@ function runPwsh(command: string, timeoutSeconds: number, signal: AbortSignal) {
 }
 
 export async function executeTool(tc: ToolCall, signal: AbortSignal): Promise<ToolResult> {
+  if (tc.name === 'read') {
+    try {
+      const args = tc.arguments ? (JSON.parse(tc.arguments) as Record<string, unknown>) : {}
+      return readTool(args)
+    } catch (err) {
+      if (signal.aborted) throw err
+      return { text: `读取失败: ${errMsg(err)}` }
+    }
+  }
+  if (tc.name === 'edit') {
+    try {
+      const args = tc.arguments ? (JSON.parse(tc.arguments) as Record<string, unknown>) : {}
+      return editTool(args)
+    } catch (err) {
+      if (signal.aborted) throw err
+      return { text: `编辑失败: ${errMsg(err)}` }
+    }
+  }
+  if (tc.name === 'write') {
+    try {
+      const args = tc.arguments ? (JSON.parse(tc.arguments) as Record<string, unknown>) : {}
+      return writeTool(args)
+    } catch (err) {
+      if (signal.aborted) throw err
+      return { text: `写入失败: ${errMsg(err)}` }
+    }
+  }
   if (tc.name === 'read_image') {
     try {
       const args = tc.arguments ? (JSON.parse(tc.arguments) as Record<string, unknown>) : {}

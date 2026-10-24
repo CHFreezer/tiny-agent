@@ -16,7 +16,7 @@ import {
   switchSession,
   withLock,
 } from './sessions.ts'
-import { getOpenAI, normalizeMessage, toApiMessages } from './upstream.ts'
+import { getOpenAI, normalizeMessage, toApiMessages, upstreamRequest } from './upstream.ts'
 import { mcpStatus, syncMcp } from './mcp.ts'
 import { compactContext } from './compact.ts'
 import { currentTools } from './tools.ts'
@@ -79,9 +79,19 @@ export function registerRoutes(app: express.Express): void {
     }
     const maxContext = toPosInt(body.maxContext)
     const maxTokens = toPosInt(body.maxTokens)
+    // 自定义请求头：仅接受字符串值；名字按 HTTP token 规则过滤，值去首尾空白
+    const headers: Record<string, string> = {}
+    if (body.headers && typeof body.headers === 'object' && !Array.isArray(body.headers)) {
+      for (const [k, v] of Object.entries(body.headers as Record<string, unknown>)) {
+        if (typeof v !== 'string' || !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(k)) continue
+        const val = v.trim()
+        if (val) headers[k] = val.slice(0, 4096)
+        if (Object.keys(headers).length >= 64) break
+      }
+    }
     try {
       fs.mkdirSync(DATA_DIR, { recursive: true })
-      fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ baseUrl, mode, model, effort, apiKey, mcp, maxContext, maxTokens, pwsh: body.pwsh === true }))
+      fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ baseUrl, mode, model, effort, apiKey, mcp, maxContext, maxTokens, headers, pwsh: body.pwsh === true }))
       void syncMcp() // 配置变更 → 对齐 MCP 连接（后台，不阻塞响应）
       res.json({ ok: true })
     } catch (err) {
@@ -287,7 +297,7 @@ export function registerRoutes(app: express.Express): void {
         max_tokens: 1,
         stream: true,
         stream_options: { include_usage: true },
-      })
+      }, upstreamRequest())
       let exact = 0
       for await (const chunk of stream) {
         if (chunk.usage?.prompt_tokens) exact = chunk.usage.prompt_tokens
@@ -377,7 +387,7 @@ export function registerRoutes(app: express.Express): void {
     }
     const key = typeof req.query.key === 'string' ? req.query.key : ''
     try {
-      const data = await getOpenAI(base, key).models.list()
+      const data = await getOpenAI(base, key).models.list(upstreamRequest())
       res.json({ models: data.data.map((m) => m.id) })
     } catch (err) {
       res.status(502).json({ error: errMsg(err) })

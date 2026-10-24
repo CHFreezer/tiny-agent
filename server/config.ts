@@ -54,12 +54,16 @@ process.on('unhandledRejection', (reason) => {
 })
 
 export function readSettings(): Settings {
-  const def: Settings = { baseUrl: '', mode: 'openai', model: '', effort: '', apiKey: '', mcp: [], maxContext: 0, maxTokens: 0, pwsh: false }
+  const def: Settings = { baseUrl: '', mode: 'openai', model: '', effort: '', apiKey: '', mcp: [], maxContext: 0, maxTokens: 0, headers: {}, pwsh: false }
   try {
     const s = { ...def, ...(JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) as Partial<Settings>) }
     s.mcp = (Array.isArray(s.mcp) ? s.mcp : [])
       .filter((c): c is McpServerConfig => !!c && typeof c.name === 'string' && typeof c.command === 'string')
       .map((c) => ({ ...c, enabled: c.enabled !== false }))
+    // 请求头：只保留字符串键值（防止手改 settings.json 塞入非法结构）
+    s.headers = s.headers && typeof s.headers === 'object' && !Array.isArray(s.headers)
+      ? Object.fromEntries(Object.entries(s.headers).filter(([k, v]) => typeof k === 'string' && typeof v === 'string'))
+      : {}
     s.pwsh = s.pwsh === true // 默认关闭：只有显式 true 才启用
     return s
   } catch {

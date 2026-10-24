@@ -4,10 +4,10 @@ import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { cn } from '@/lib/utils'
 import { showLightbox } from '@/components/Lightbox'
-import type { Entry } from '@/lib/types'
+import type { EditDiff, Entry } from '@/lib/types'
 
 // breaks=true 时单换行也渲染为 <br>（user/工具结果/思考保留原始换行）
-export function renderMarkdown(text: string, breaks = false): string {
+function renderMarkdown(text: string, breaks = false): string {
   // 兼容旧数据：早期 MCP 错误前缀 “(MCP 返回错误) ” 后无换行，导致后续 ### 等标题语法不渲染
   const src = text.replace(/\(MCP 返回错误\) (#{1,6}\s)/g, '(MCP 返回错误)\n$1')
   const html = DOMPurify.sanitize(marked.parse(src, { async: false, breaks }) as string)
@@ -89,6 +89,53 @@ function CollapsibleText({ label, text, className, preview = true, error = false
   )
 }
 
+// 工具结果里的编辑 diff：文件路径 + (+N/-M) 统计，行号 + (+/-) 行，横向可滚动，纵向限高
+function DiffView({ diff }: { diff: EditDiff }) {
+  const isHex = diff.kind === 'hex'
+  const bytes = (text: string) => (text.trim() ? text.trim().split(/\s+/).length : 0)
+  const added = diff.blocks.reduce((n, b) => n + b.lines.filter((l) => l.type === '+').reduce((m, l) => m + (isHex ? bytes(l.text) : 1), 0), 0)
+  const removed = diff.blocks.reduce((n, b) => n + b.lines.filter((l) => l.type === '-').reduce((m, l) => m + (isHex ? bytes(l.text) : 1), 0), 0)
+  return (
+    <div className="mt-1 overflow-hidden rounded-lg border border-border bg-muted/40">
+      <div className="flex items-center justify-between gap-3 border-b border-border px-2.5 py-1 font-mono text-[11px] text-muted-foreground">
+        <span className="truncate">{diff.path}</span>
+        <span className="shrink-0 tabular-nums">
+          <span className="text-green-600 dark:text-green-400">+{added}{isHex ? 'B' : ''}</span>{' '}
+          <span className="text-red-600 dark:text-red-400">-{removed}{isHex ? 'B' : ''}</span>
+        </span>
+      </div>
+      <div className="max-h-56 overflow-auto font-mono text-[11px] leading-5">
+        {isHex && diff.offset && <div className="px-2.5 py-0.5 italic text-muted-foreground">{`offset=${diff.offset}`}</div>}
+        {diff.blocks.map((block, bi) => (
+          <div key={bi} className={cn(bi > 0 && 'border-t border-border/60')}>
+            {block.lines.map((line, li) => (
+              <div
+                key={li}
+                className={cn(
+                  'flex min-w-max whitespace-pre',
+                  line.type === '-'
+                    ? 'bg-red-500/10 text-red-700 dark:text-red-300'
+                    : line.type === '+'
+                      ? 'bg-green-500/10 text-green-700 dark:text-green-300'
+                      : line.type === '\\'
+                        ? 'text-muted-foreground italic'
+                        : '',
+                )}
+              >
+                <span className="w-10 shrink-0 select-none px-1 text-right text-muted-foreground/70">
+                  {isHex ? '' : line.type === '+' ? (line.newNo ?? '') : (line.oldNo ?? '')}
+                </span>
+                <span className="w-4 shrink-0 select-none text-center">{line.type === ' ' ? '' : line.type}</span>
+                <span className="pr-2">{line.text}</span>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 // MCP 工具显示名：mcp__server__tool → server:tool（仅展示）
 const formatToolName = (name: string) => (name.startsWith('mcp__') ? name.replace(/^mcp__(.*?)__(.+)$/, '$1: $2') : name)
 
@@ -123,10 +170,13 @@ export function EntryContent({
   }
   if (entry.role === 'tool') {
     const content = entry.content ?? ''
+    // 带结构化 diff 时，正文里的 unified diff 只给模型；前端只显示首行摘要，避免重复
+    const display = entry.diff ? content.split('\n')[0] : content
     const isMcpError = content.startsWith('(MCP 返回错误)') || content.startsWith('MCP 工具执行失败')
     return (
       <>
-        <CollapsibleText label="工具结果" text={content} error={isMcpError} selectMode={selectMode} />
+        <CollapsibleText label="工具结果" text={display} error={isMcpError} selectMode={selectMode} />
+        {entry.diff && <DiffView diff={entry.diff} />}
         {entry.images?.map((url, i) => (
           <img key={i} src={url} className="mt-1.5 block max-h-50 max-w-50 rounded-lg object-cover cursor-zoom-in" alt="" onClick={() => showLightbox(url)} />
         ))}

@@ -25,7 +25,7 @@ export function broadcast(o: unknown): void {
 }
 
 // 会话列表元数据（不含 history——历史可能含 base64 图片，通知里不重复传输）
-export const sessionMeta = () =>
+const sessionMeta = () =>
   listSorted().map((s) => ({
     id: s.id,
     title: s.title,

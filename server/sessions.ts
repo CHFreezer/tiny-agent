@@ -141,7 +141,7 @@ export function deleteSession(id: number): { sessions: Session[]; currentId: num
 
 // ===== 条目删除：级联 + 孤儿清理 =====
 // 工具调用/工具结果成对绑定：删调用气泡连带删其工具结果（结果可能暂未生成，找不到即可）；删工具结果连带删发出该调用的气泡
-export function cascadeDrop(history: Entry[], entry: Entry, drop: Set<string>): void {
+function cascadeDrop(history: Entry[], entry: Entry, drop: Set<string>): void {
   drop.add(entry.id)
   if (entry.role === 'assistant' && entry.tool_calls?.length) {
     const ids = new Set(entry.tool_calls.map((tc) => tc.id))
@@ -151,7 +151,7 @@ export function cascadeDrop(history: Entry[], entry: Entry, drop: Set<string>): 
   }
 }
 // 气泡被连带删除后，其余工具结果成为孤儿（tool 消息必须配对 tool_calls，否则上游 400），一并清除
-export function dropOrphanedTools(history: Entry[], drop: Set<string>): void {
+function dropOrphanedTools(history: Entry[], drop: Set<string>): void {
   for (const e of history) {
     if (e.role === 'tool' && e.tool_call_id && !drop.has(e.id)) {
       const parent = history.find((p) => p.role === 'assistant' && p.tool_calls?.some((tc) => tc.id === e.tool_call_id))

@@ -28,8 +28,7 @@
        ──/api（NDJSON 流式：会话内容）──────┴─> Express server ──OpenAI SDK──> OpenAI 兼容上游
                                     │
                     ┌───────────────┼───────────────┐
-                内置工具          MCP 插件          TTS
-              (pwsh/read_image)  (stdio 子进程)   (pwsh 7)
+                   内置工具 read/edit/write/pwsh/read_image · MCP 插件（stdio） · TTS（pwsh 7）
 ```
 
 ```
@@ -77,12 +76,15 @@ npm run dev:server -- --data-dir <数据目录路径>  # 仅 server
 | `settings.json` | 上游地址、模型、MCP 配置、工具开关（UI 设置页写入） |
 | `sessions/` | 会话，每会话一个 JSON 文件 + `_index.json`（当前会话）；`sessions/<会话id>/` 存该会话的图片文件 |
 | `memories.json` | 持久记忆，每次生成注入 developer 角色 |
-| `workspace/` | 所有工具（pwsh / read_image / MCP 插件）共享工作目录，文件互相可见；`%TEMP%` 重定向到其 `tmp/`（启动时清扫 7 天前文件） |
+| `workspace/` | 所有工具（read / edit / write / pwsh / read_image / MCP 插件）共享工作目录，文件互相可见；`%TEMP%` 重定向到其 `tmp/`（启动时清扫 7 天前文件） |
 | `tts.wav` | TTS 缓存（同文本复用） |
 | `crash.log` | 未捕获异常/未处理 rejection 日志 |
 
 ## 工具
 
+- **write**：创建新文件（目标已存在则失败，修改用 edit）；`content` 为内容，`encoding` 默认 utf-8（可传 gbk/shift_jis 等），`encoding:"hex"` 时按十六进制字节写入；自动创建父目录；新建文件不写 BOM（需要 BOM 用 hex 显式写入）
+- **read**：读取文件。`encoding` 默认 `utf-8`，按 cat -n 风格返回文本（行号右对齐 6 位 + Tab）。文本模式用 `line`（1-based 起始行，默认 1）+ `limit`（行数）；`encoding:"hex"` 用 `offset`（0-based 字节偏移，支持 0x）+ `limit`（字节数）以 HxD 风格查看二进制。也可指定 `gbk`/`gb18030`/`big5`/`big5-hkscs`/`shift_jis`/`cp932`/`euc-jp`/`euc-kr`/`cp949`/`utf-16le/be`/`utf-32le/be` 等文本编码（行号按编码的 code unit 对齐计算；TextDecoder 不支持的标签回退 iconv），或 `encoding:"hex"` 以 HxD 风格查看二进制（绝对地址 + 16 字节/行 hex + ASCII，按字节分页）
+- **edit**：修改现有文件（创建用 write）。文本模式：`old` 为要替换的原文（可为行内片段/多行，按字节精确匹配，LF/CRLF 不做转换），`new` 空=删除；`replace_all` 默认只替换第一处；`line` 可选（1-based），替换时作为查找起点。`old` 空/省略=插入：不填 `line` 仅可写空文件，填 `line` 则把 `new` 原样插入该行行首（行号+1=末尾，换行需包含在 `new` 中）。文本用 `line`，hex 用 `offset`（0-based 字节，支持 0x，必填）；hex 模式 `old`/`new` 为十六进制字节，按 sha256 校验原始字节，`replace_all` 不可用。编辑后附带的 diff 与前端同一份，行号按 git/read 语义（末尾换行不算额外一行），行尾符参与比较，末行缺少换行时追加 git 风格的 No newline 标记。
 - **pwsh**：在本地执行 PowerShell 7 命令（设置页可开关）；工作目录 `data/workspace`
 - **read_image**：读取本机图片（≤20MB）注入上下文；相对路径基于 `data/workspace`
 - **MCP 插件**：设置页配置 `command + args + env`，官方 `@modelcontextprotocol/sdk` stdio 传输；工作目录 `data/workspace`（与内置工具共享，TEMP 重定向到其 `tmp/`）；工具名加 `mcp__<插件>__` 前缀；20s 连接超时（首次 npx 拉包较慢）、30s 工具超时；服务器退出时按进程树清理（Windows `taskkill /T`）
