@@ -32,6 +32,22 @@ fs.mkdirSync(path.join(DATA_DIR, 'sessions'), { recursive: true })
 export const WORKSPACE_DIR = path.join(DATA_DIR, 'workspace')
 fs.mkdirSync(path.join(WORKSPACE_DIR, 'tmp'), { recursive: true })
 
+// 工具级 cwd 覆盖：相对路径基于 workspace；省略/空 = workspace；必须是已存在目录
+export function resolveCwd(input: unknown): { dir: string } | { error: string } {
+  const raw = input === undefined || input === null ? '' : String(input).trim()
+  if (!raw) return { dir: WORKSPACE_DIR }
+  const abs = path.resolve(WORKSPACE_DIR, raw)
+  try {
+    if (!fs.statSync(abs).isDirectory()) return { error: `cwd 不是目录: ${abs}` }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    return {
+      error: code === 'ENOENT' ? `cwd 不存在: ${abs}` : `cwd 不可用: ${abs}（${errMsg(err)}）`,
+    }
+  }
+  return { dir: abs }
+}
+
 // 崩溃观测：未捕获异常/未处理 rejection 写盘（dev 进程退出后控制台日志会丢）
 const CRASH_LOG = path.join(DATA_DIR, 'crash.log')
 const logCrash = (kind: string, err: unknown) => {

@@ -13,6 +13,7 @@ export interface Entry {
   tool_call_id?: string
   images?: string[]
   diff?: EditDiff // edit 工具结果的结构化 diff（仅展示）
+  error?: boolean // 工具结果失败（前端标红；不发给上游）
   summaryStatus?: 'failed' // 压缩摘要生成失败：不是有效分割点
   ts?: number // 创建时间（毫秒），前端显示相对时间
 }

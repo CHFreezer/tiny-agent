@@ -3,7 +3,7 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import OpenAI from 'openai'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
-import { WORKSPACE_DIR, errMsg, readSettings } from './config.ts'
+import { WORKSPACE_DIR, errMsg, readSettings, resolveCwd } from './config.ts'
 import { MCP_TOOL_TIMEOUT, mcpToolMap, mcpTools } from './mcp.ts'
 import { editTool, readTool, writeTool } from './files.ts'
 import type { ToolCall, ToolResult } from './types.ts'
@@ -16,7 +16,7 @@ const READ_TOOL: OpenAI.Chat.ChatCompletionTool = {
     description: `读取文件。encoding 默认 "utf-8"；encoding:"hex" 为十六进制模式（地址 + 16 字节/行 + ASCII）。
 - 文本：line = 起始行（1-based，默认 1），limit = 行数（默认/上限 2000）；输出 cat -n 风格（行号右对齐 + Tab），行号不要复制进 old
 - hex：offset = 字节偏移（0-based，支持 0x），limit = 字节数（默认 1024，上限 4096）
-编码支持 iconv-lite 标签。路径相对 workspace 根目录（也支持绝对路径）。`,
+编码支持 iconv-lite 标签。路径相对 cwd（默认 workspace 根目录，也支持绝对路径）。`,
     parameters: {
       type: 'object',
       properties: {
@@ -25,6 +25,7 @@ const READ_TOOL: OpenAI.Chat.ChatCompletionTool = {
         line: { type: 'number', description: '文本：起始行（1-based，默认 1）' },
         offset: { type: ['number', 'string'], description: 'hex：字节偏移（0-based，支持 0x）' },
         limit: { type: 'number', description: '文本=行数；hex=字节数' },
+        cwd: { type: 'string', description: '工作目录覆盖（必须已存在；相对路径基于 workspace，省略=workspace）' },
       },
       required: ['path'],
     },
@@ -37,7 +38,7 @@ const EDIT_TOOL: OpenAI.Chat.ChatCompletionTool = {
     description: `修改现有文件（创建用 write）。
 文本：old 空/省略=插入（无 line 仅空文件；有 line 插到该行行首，new 需自带换行；行数+1=末尾，仅当文件以换行结尾）；否则替换 old，new 空=删除；多处默认第一处，replace_all 全部；换行按输入原样匹配。
 hex：offset 必填，old/new 为十六进制字节；old 空=插入，new 空=删除；replace_all、line 不可用。
-校验：文本按编码精确查找 old；hex 在 offset 处做 sha256 校验。路径相对 workspace 根目录。`,
+校验：文本按编码精确查找 old；hex 在 offset 处做 sha256 校验。路径相对 cwd（默认 workspace 根目录）。`,
     parameters: {
       type: 'object',
       properties: {
@@ -48,6 +49,7 @@ hex：offset 必填，old/new 为十六进制字节；old 空=插入，new 空=�
         replace_all: { type: 'boolean', description: '全部匹配替换' },
         line: { type: 'number', description: '插入行号或查找起点（1-based）' },
         offset: { type: ['number', 'string'], description: 'hex：字节偏移（0-based，支持 0x）' },
+        cwd: { type: 'string', description: '工作目录覆盖（必须已存在；相对路径基于 workspace，省略=workspace）' },
       },
       required: ['path', 'new'],
     },
@@ -60,13 +62,14 @@ const WRITE_TOOL: OpenAI.Chat.ChatCompletionTool = {
     description: `创建新文件（已存在则失败；修改用 edit），自动建父目录。
 - content：内容；encoding 默认 "utf-8"，encoding:"hex" 时为十六进制字节
 - 不写 BOM（需要 BOM 用 hex 显式写入）
-路径相对 workspace 根目录（也支持绝对路径）。`,
+路径相对 cwd（默认 workspace 根目录，也支持绝对路径）。`,
     parameters: {
       type: 'object',
       properties: {
         path: { type: 'string', description: '文件路径' },
         content: { type: 'string', description: '内容；hex 模式为十六进制字节' },
         encoding: { type: 'string', description: '文本编码（默认 utf-8）或 "hex"' },
+        cwd: { type: 'string', description: '工作目录覆盖（必须已存在；相对路径基于 workspace，省略=workspace）' },
       },
       required: ['path', 'content'],
     },
@@ -76,12 +79,13 @@ const PWSH_TOOL: OpenAI.Chat.ChatCompletionTool = {
   type: 'function',
   function: {
     name: 'pwsh',
-    description: `在本地机器上执行 PowerShell 7（pwsh.exe）命令并返回输出，可用于系统查询、文件操作等。工作目录为 workspace 根目录（相对路径基于它）。`,
+    description: `在本地机器上执行 PowerShell 7（pwsh.exe）命令并返回输出，可用于系统查询、文件操作等。cwd 可覆盖工作目录（必须是已存在目录；默认 workspace 根目录）。`,
     parameters: {
       type: 'object',
       properties: {
         command: { type: 'string', description: '要执行的 PowerShell 命令' },
         timeout: { type: 'number', description: '超时秒数，默认 30，最大 600' },
+        cwd: { type: 'string', description: '工作目录覆盖（必须已存在；相对路径基于 workspace，省略=workspace）' },
       },
       required: ['command'],
     },
@@ -91,11 +95,12 @@ const READ_IMAGE_TOOL: OpenAI.Chat.ChatCompletionTool = {
   type: 'function',
   function: {
     name: 'read_image',
-    description: `读取本机图片文件（png/jpg/webp/gif）并让模型看到图片内容（例如其他工具或脚本截图落盘后的文件）。路径相对 workspace 根目录（也支持绝对路径）。`,
+    description: `读取本机图片文件（png/jpg/webp/gif）并让模型看到图片内容（例如其他工具或脚本截图落盘后的文件）。路径相对 cwd（默认 workspace 根目录，也支持绝对路径）。`,
     parameters: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: `图片文件路径（相对 workspace 根目录）` },
+        path: { type: 'string', description: `图片文件路径（相对 cwd）` },
+        cwd: { type: 'string', description: '工作目录覆盖（必须已存在；相对路径基于 workspace，省略=workspace）' },
       },
       required: ['path'],
     },
@@ -107,14 +112,60 @@ export function currentTools(): OpenAI.Chat.ChatCompletionTool[] {
   return [...(readSettings().pwsh ? [PWSH_TOOL] : []), READ_TOOL, EDIT_TOOL, WRITE_TOOL, READ_IMAGE_TOOL, ...mcpTools()]
 }
 
+// MCP 工具结果 → ToolResult：文本 + image content（如 Playwright 截图）转 data URL，
+// 图片与 read_image 走同一条落盘/注入路径
+export function formatMcpResult(result: CallToolResult): ToolResult {
+  const parts = Array.isArray(result.content) ? result.content : []
+  const texts = parts
+    .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
+    .map((c) => c.text)
+  const images = parts
+    .filter((c): c is { type: 'image'; data: string; mimeType: string } => c.type === 'image')
+    .map((c) => `data:${c.mimeType || 'image/png'};base64,${c.data}`)
+  const out = texts.join('\n') || (images.length ? '(图片结果)' : '(无文本输出)')
+  return {
+    text: (result.isError ? '(MCP 返回错误)\n' : '') + clipMiddle(out, MCP_MAX_OUTPUT_CHARS),
+    isError: result.isError === true,
+    ...(images.length ? { images } : {}),
+  }
+}
+
 // ===== 工具执行（服务器侧） =====
 // 只支持 PowerShell 7（pwsh.exe）：脚本正文作为单个 argv 元素交给 -Command，不做任何注入（照 opencode shell.ts:293）
 const PWSH_DEFAULT_TIMEOUT_S = 30
 const PWSH_MAX_TIMEOUT_S = 600
 const PWSH_MAX_CAPTURE_BYTES = 1024 * 1024 // 捕获窗口（滚动）：只留最新这么多字节，超出丢最旧的，不杀进程
-const PWSH_MAX_OUTPUT_CHARS = 10000 // 交给模型的字符上限（同样取最新的）
-function runPwsh(command: string, timeoutSeconds: number, signal: AbortSignal) {
-  const { promise, resolve, reject } = Promise.withResolvers<{ exitCode: number; output: string }>()
+const PWSH_MAX_OUTPUT_CHARS = 10000 // 交给模型的字符上限（头+尾）
+const PWSH_HEAD_CHARS = 2000 // 超限时保留的开头字符数（报错信息常在开头），其余留给结尾
+const MCP_MAX_OUTPUT_CHARS = 8000 // MCP 文本结果上限（与 pwsh 同策略）
+
+// 头+尾保留：异常关键信息常出现在开头，只留尾部会丢掉最有用的部分；
+// 超出上限时丢中间并标记省略量（按代理对边界切，避免劈开 emoji/生僻字）
+const clipMiddle = (text: string, max: number, headChars = PWSH_HEAD_CHARS): string => {
+  if (text.length <= max) return text
+  let headEnd = Math.min(headChars, text.length)
+  const headNl = text.lastIndexOf('\n', headEnd)
+  if (headNl > 0) headEnd = headNl
+  else if (headEnd > 0 && /[\uD800-\uDBFF]/.test(text[headEnd - 1])) headEnd--
+  let tailStart = Math.max(0, text.length - (max - headChars))
+  const tailNl = text.indexOf('\n', tailStart)
+  if (tailNl >= 0) tailStart = tailNl + 1
+  else if (tailStart > 0 && /[\uDC00-\uDFFF]/.test(text[tailStart])) tailStart++
+  const head = text.slice(0, headEnd)
+  const tail = text.slice(tailStart)
+  return `${head}\n[... 省略 ${text.length - head.length - tail.length} 字符 ...]\n${tail}`
+}
+
+interface PwshRun {
+  text: string
+  stdout: string
+  stderr: string
+  exitCode: number | null // null = 超时/启动失败/被终止
+  durationMs: number
+  timedOut: boolean
+}
+function runPwsh(command: string, timeoutSeconds: number, signal: AbortSignal, cwd: string) {
+  const { promise, resolve, reject } = Promise.withResolvers<PwshRun>()
   const preparedCommand =
     `try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}\n` +
     command
@@ -123,7 +174,7 @@ function runPwsh(command: string, timeoutSeconds: number, signal: AbortSignal) {
   const child = spawn('pwsh.exe', args, {
     shell: false,
     windowsHide: true,
-    cwd: WORKSPACE_DIR,
+    cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, NO_COLOR: '1', TEMP: path.join(WORKSPACE_DIR, 'tmp'), TMP: path.join(WORKSPACE_DIR, 'tmp'), TMPDIR: path.join(WORKSPACE_DIR, 'tmp') },
   })
@@ -156,32 +207,36 @@ function runPwsh(command: string, timeoutSeconds: number, signal: AbortSignal) {
   const onAbort = () => child.kill()
   signal.addEventListener('abort', onAbort, { once: true })
   let settled = false
-  const finish = (exitCode: number, spawnError?: Error) => {
+  const finish = (code: number | null, spawnError?: Error) => {
     if (settled) return
     settled = true
     clearTimeout(timer)
     signal.removeEventListener('abort', onAbort)
-    const parts: string[] = []
-    const out = Buffer.concat(stdoutSink.chunks).toString('utf8').trim()
-    const errOut = Buffer.concat(stderrSink.chunks).toString('utf8').trim()
-    if (out) parts.push(out)
-    if (errOut) parts.push(errOut)
-    // 进程正常结束但无输出 → (无输出)，别把整条命令行回显给模型；只有启动失败（ENOENT 等）才用 message
-    const text = parts.join('\n').replace(/\x1b\[[0-9;]*[A-Za-z]/g, '') || (spawnError ? String(spawnError.message) : '(无输出)')
-    // 两个窗口都是去头留尾：头部的信息缺失在正文前说明，被杀说明在正文后，三者都不参与窗口裁剪
+    const durationMs = Date.now() - startedAt
+    const stdout = Buffer.concat(stdoutSink.chunks).toString('utf8').trim().replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+    const stderr = Buffer.concat(stderrSink.chunks).toString('utf8').trim().replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+    // 状态标记统一放正文前：退出码/超时/启动失败才决定 isError；
+    // stderr 只标段不判失败（命令成功但程序往 stderr 打印很常见）
     const head: string[] = []
+    if (spawnError) head.push(`[启动失败] ${spawnError.message}`)
+    else if (timedOut) head.push(`[超时] 运行 ${(durationMs / 1000).toFixed(1)}s（上限 ${timeoutSeconds}s）`)
+    else if (code == null) head.push('[进程被终止]')
+    else if (code !== 0) head.push(`[退出码 ${code}]`)
     const rolled = stdoutSink.dropped + stderrSink.dropped
-    if (rolled > 0) head.push(`[截断] 前 ${rolled} 字节（捕获上限 ${PWSH_MAX_CAPTURE_BYTES / 1024 / 1024}MB）`)
-    if (text.length > PWSH_MAX_OUTPUT_CHARS) {
-      head.push(`[截断] 前 ${text.length - PWSH_MAX_OUTPUT_CHARS} 字符（显示上限 ${PWSH_MAX_OUTPUT_CHARS}）`)
-    }
-    const tail = timedOut ? [`[超时] 运行 ${((Date.now() - startedAt) / 1000).toFixed(1)}s（上限 ${timeoutSeconds}s）`] : []
-    resolve({ exitCode: timedOut ? 0 : exitCode, output: [...head, text.slice(-PWSH_MAX_OUTPUT_CHARS), ...tail].join('\n') })
+    if (rolled > 0) head.push(`[截断] 捕获上限 ${PWSH_MAX_CAPTURE_BYTES / 1024 / 1024}MB，丢弃前 ${rolled} 字节`)
+    // stdout/stderr 是两条独立管道，交错顺序无法还原；两段都有时加标签分段
+    const body = stdout && stderr
+      ? `[stdout]\n${stdout}\n[stderr]\n${stderr}`
+      : stderr
+        ? `[stderr]\n${stderr}`
+        : stdout || (spawnError ? '' : '(无输出)')
+    if (body) head.push(clipMiddle(body, PWSH_MAX_OUTPUT_CHARS))
+    resolve({ text: head.join('\n'), stdout, stderr, exitCode: timedOut || spawnError ? null : code, durationMs, timedOut })
   }
-  child.on('error', (err) => finish(0, err))
+  child.on('error', (err) => finish(null, err))
   child.on('close', (code) => {
     if (signal.aborted) reject(new Error('aborted'))
-    else finish(code ?? 0)
+    else finish(code)
   })
   return promise
 }
@@ -193,7 +248,7 @@ export async function executeTool(tc: ToolCall, signal: AbortSignal): Promise<To
       return readTool(args)
     } catch (err) {
       if (signal.aborted) throw err
-      return { text: `读取失败: ${errMsg(err)}` }
+      return { text: `读取失败: ${errMsg(err)}`, isError: true }
     }
   }
   if (tc.name === 'edit') {
@@ -202,7 +257,7 @@ export async function executeTool(tc: ToolCall, signal: AbortSignal): Promise<To
       return editTool(args)
     } catch (err) {
       if (signal.aborted) throw err
-      return { text: `编辑失败: ${errMsg(err)}` }
+      return { text: `编辑失败: ${errMsg(err)}`, isError: true }
     }
   }
   if (tc.name === 'write') {
@@ -211,36 +266,48 @@ export async function executeTool(tc: ToolCall, signal: AbortSignal): Promise<To
       return writeTool(args)
     } catch (err) {
       if (signal.aborted) throw err
-      return { text: `写入失败: ${errMsg(err)}` }
+      return { text: `写入失败: ${errMsg(err)}`, isError: true }
     }
   }
   if (tc.name === 'read_image') {
     try {
       const args = tc.arguments ? (JSON.parse(tc.arguments) as Record<string, unknown>) : {}
       const p = String(args.path ?? '')
-      const abs = path.resolve(WORKSPACE_DIR, p)
+      const cwd = resolveCwd(args.cwd)
+      if ('error' in cwd) return { text: `读取图片失败: ${cwd.error}`, isError: true }
+      const abs = path.resolve(cwd.dir, p)
       const st = fs.statSync(abs)
       if (!st.isFile()) throw new Error('不是文件')
       if (st.size > 20 * 1024 * 1024) throw new Error('图片过大（上限 20MB）')
       const ext = path.extname(abs).toLowerCase()
       const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : ext === '.webp' ? 'image/webp' : ext === '.gif' ? 'image/gif' : 'image/png'
       const dataUrl = `data:${mime};base64,${fs.readFileSync(abs).toString('base64')}`
-      return { text: `已读取图片 ${abs}（${st.size} 字节），图片内容已加入上下文`, images: [dataUrl] }
+      return { text: `已读取图片 ${abs}（${st.size} 字节）`, images: [dataUrl] }
     } catch (err) {
       if (signal.aborted) throw err
-      return { text: `读取图片失败: ${errMsg(err)}` }
+      return { text: `读取图片失败: ${errMsg(err)}`, isError: true }
     }
   }
   if (tc.name === 'pwsh') {
     try {
       const args = tc.arguments ? (JSON.parse(tc.arguments) as Record<string, unknown>) : {}
+      const cwd = resolveCwd(args.cwd)
+      if ('error' in cwd) return { text: `工具执行失败: ${cwd.error}`, isError: true }
       const requested = Math.floor(Number(args.timeout))
       const timeoutSeconds = Number.isFinite(requested) && requested > 0 ? Math.min(requested, PWSH_MAX_TIMEOUT_S) : PWSH_DEFAULT_TIMEOUT_S
-      const r = await runPwsh(String(args.command ?? ''), timeoutSeconds, signal)
-      return { text: r.exitCode === 0 ? r.output : `[退出码 ${r.exitCode}]\n${r.output}` }
+      const r = await runPwsh(String(args.command ?? ''), timeoutSeconds, signal, cwd.dir)
+      return {
+        text: r.text,
+        stdout: r.stdout,
+        stderr: r.stderr,
+        exitCode: r.exitCode,
+        durationMs: r.durationMs,
+        timedOut: r.timedOut,
+        isError: r.exitCode !== 0, // 超时/启动失败/被终止时 exitCode 为 null
+      }
     } catch (err) {
       if (signal.aborted) throw err
-      return { text: `工具执行失败: ${errMsg(err)}` }
+      return { text: `工具执行失败: ${errMsg(err)}`, isError: true }
     }
   }
   // MCP 工具：路由到对应服务器的连接（超时 + 用户停止信号）
@@ -253,15 +320,11 @@ export async function executeTool(tc: ToolCall, signal: AbortSignal): Promise<To
         undefined,
         { timeout: MCP_TOOL_TIMEOUT, signal },
       )) as CallToolResult
-      const texts = (Array.isArray(result.content) ? result.content : [])
-        .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
-        .map((c) => c.text)
-      const out = texts.join('\n') || '(无文本输出)'
-      return { text: ((result.isError ? '(MCP 返回错误)\n' : '') + out).slice(0, 8000) }
+      return formatMcpResult(result)
     } catch (err) {
       if (signal.aborted) throw err
-      return { text: `MCP 工具执行失败: ${errMsg(err)}` }
+      return { text: `MCP 工具执行失败: ${errMsg(err)}`, isError: true }
     }
   }
-  return { text: `未知工具: ${tc.name}` }
+  return { text: `未知工具: ${tc.name}`, isError: true }
 }
