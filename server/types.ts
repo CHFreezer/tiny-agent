@@ -73,7 +73,7 @@ export interface McpServerConfig {
   name: string
   command: string
   args: string
-  env: string
+  env: Record<string, string> // 环境变量键值（旧配置的 "K=V;K2=V2" 字符串在 readSettings 里归一化）
   enabled: boolean // 工具是否加入模型上下文（false=不连接、不出现在工具集）
 }
 export interface Settings {

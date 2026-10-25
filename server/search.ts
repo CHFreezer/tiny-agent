@@ -3,6 +3,7 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { resolveCwd } from './config.ts'
 import { clipMiddle } from './text.ts'
+import { fsErrorText } from './fsError.ts'
 import type { SearchFile, SearchLine, SearchResult, ToolResult } from './types.ts'
 
 // ===== search：ripgrep --json 流式搜索 =====
@@ -60,6 +61,34 @@ async function resolveRg(): Promise<string> {
 }
 
 const fail = (text: string): ToolResult => ({ text, isError: true })
+
+// 子进程启动失败：把 Node 的 spawn 错误收敛成可读文案
+const spawnErrorText = (err: Error): string => {
+  const code = (err as NodeJS.ErrnoException).code
+  if (code === 'ENOENT') return '找不到 rg 可执行文件'
+  if (code === 'EACCES' || code === 'EPERM') return '没有权限执行 rg'
+  return err.message
+}
+// rg 的 stderr 是引擎自己的诊断：纯权限类报错只给结论，避免把 os error 噪音透给模型。
+// stderr 只保留末尾 4000 字符，可能从行中间开始，因此只统计完整的 "rg:" 诊断行。
+const summarizeRgError = (raw: string): string => {
+  const diagnostics = raw.split(/\r?\n/).map((l) => l.trim()).filter((l) => /^rg:/i.test(l))
+  // 逐文件的 OS 级读取错误（权限/占用/系统拒绝等）对模型没有可操作信息，统一收敛
+  const accessNoise = /os error \d+\b|拒绝访问|另一个程序已锁定|系统无法访问此文件|being used by another process|Permission denied|Access is denied/i
+  if (diagnostics.length && diagnostics.every((l) => accessNoise.test(l))) {
+    return '部分路径无法读取'
+  }
+  // 正则编译失败：rg 会输出两套引擎的长篇诊断，只保留第一处可读原因
+  if (/regex (could not be compiled|parse error)/i.test(raw)) {
+    const detail = /^error: (.+)$/m.exec(raw)?.[1] ?? /PCRE2: error compiling pattern[^:]*:\s*(.+)$/m.exec(raw)?.[1] ?? ''
+    return `正则表达式无法编译${detail ? `：${detail.trim()}` : ''}`
+  }
+  const globErr = /error parsing glob '([^']*)':\s*(.+)/.exec(raw)
+  if (globErr) return `glob 无效（${globErr[1]}）：${globErr[2].trim()}`
+  const encErr = /unknown encoding:\s*(\S+)/i.exec(raw)
+  if (encErr) return `不支持的编码：${encErr[1]}`
+  return raw
+}
 
 // 按行切分流式输出（块边界可能切在行中间）
 function lineSplitter(onLine: (line: string) => void) {
@@ -248,7 +277,7 @@ function scanNames(abs: string, isDir: boolean, cwd: string, pattern: string, na
       stderr = (stderr + chunk.toString('utf8')).slice(-4000)
     })
     child.on('error', (err) => {
-      stderr = err.message
+      stderr = spawnErrorText(err)
       finish()
     })
     child.on('close', () => {
@@ -402,7 +431,7 @@ function scanContent(pattern: string, abs: string, cwd: string, remaining: numbe
       stderr = (stderr + chunk.toString('utf8')).slice(-4000)
     })
     child.on('error', (err) => {
-      stderr = err.message
+      stderr = spawnErrorText(err)
       finish()
     })
     child.on('close', (code) => {
@@ -443,8 +472,8 @@ export async function searchTool(args: {
     const st = fs.statSync(abs)
     isDir = st.isDirectory()
     if (!isDir && !st.isFile()) return fail(`搜索失败: 不是文件或目录: ${abs}`)
-  } catch {
-    return fail(`搜索失败: 路径不存在: ${abs}`)
+  } catch (err) {
+    return fail(`搜索失败: ${fsErrorText(err, abs)}`)
   }
   const toInt = (v: unknown, def: number) => {
     const n = Math.floor(Number(v))
@@ -454,9 +483,13 @@ export async function searchTool(args: {
   const timeoutS = Math.min(toInt(args.timeout, DEFAULT_TIMEOUT_S), MAX_TIMEOUT_S)
   const deadline = Date.now() + timeoutS * 1000
   const remainingMs = () => Math.max(1, deadline - Date.now())
-  const encoding = typeof args.encoding === 'string' && /^[A-Za-z0-9._-]+$/.test(args.encoding.trim()) ? args.encoding.trim().slice(0, 32) : undefined
+  const encodingArg = typeof args.encoding === 'string' ? args.encoding.trim() : ''
+  if (encodingArg && !/^[A-Za-z0-9._-]+$/.test(encodingArg)) return fail(`搜索失败: 不支持的 encoding: ${encodingArg}`)
+  const encoding = encodingArg ? encodingArg.slice(0, 32) : undefined
   const mode: 'literal' | 'regex' = args.mode === 'regex' ? 'regex' : 'literal'
   const flagStr = typeof args.flags === 'string' ? args.flags.toLowerCase() : Array.isArray(args.flags) ? args.flags.join('').toLowerCase() : ''
+  const badFlags = [...new Set([...flagStr].filter((c) => c !== 'i' && c !== 'w'))]
+  if (badFlags.length) return fail(`搜索失败: 不支持的 flags: ${badFlags.join('')}（仅支持 i、w）`)
   const ignoreCase = flagStr.includes('i')
   const wholeWord = flagStr.includes('w')
   const ctxRaw = Math.floor(Number(args.context))
@@ -502,7 +535,7 @@ export async function searchTool(args: {
   }
 
   const err = content.error ?? (content.total === 0 ? names.error : undefined)
-  if (err) return { text: clipMiddle(`搜索失败: ${err}`, MAX_TEXT_CHARS), isError: true }
+  if (err) return { text: clipMiddle(`搜索失败: ${summarizeRgError(err)}`, MAX_TEXT_CHARS), isError: true }
 
   const filters = [
     userIncludes.length ? `仅：${userIncludes.join('、')}` : '',
@@ -529,16 +562,15 @@ export async function searchTool(args: {
   }
   const totalResults = content.total + names.hits.size
   const breakdown = names.hits.size ? `（${content.total} 处内容 + ${names.hits.size} 个文件名命中）` : ''
-  const nonUtf8Hint = content.nonUtf8 ? '，含非 UTF-8 内容（建议指定 encoding）' : ''
+  const nonUtf8Hint = content.nonUtf8 ? '，含非 UTF-8 内容' : ''
   lines.push(
     `[${files.length} 个文件，${totalResults} 个结果${breakdown}${result.timedOut ? '，搜索超时' : ''}${nonUtf8Hint}]`,
   )
   if (result.truncated) lines.push(`[已截断] 已显示 ${totalResults} 个结果（上限 ${maxResults}）`)
-  const timedOut = content.timedOut || names.timedOut
+  // 超时不是错误：结果可能只是不完整，正文里已经有「搜索超时」标记
   return {
     text: clipMiddle(lines.join('\n'), MAX_TEXT_CHARS),
     search: result,
-    isError: timedOut,
     durationMs: Date.now() - startedAt,
   }
 }

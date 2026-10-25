@@ -2,7 +2,7 @@ import OpenAI from 'openai'
 import { readMemories } from './memories.ts'
 import { currentTools } from './tools.ts'
 import { imageInfo, toDataUrl } from './images.ts'
-import { readSettings } from './config.ts'
+import { readSettings, WORKSPACE_DIR } from './config.ts'
 import type { Entry } from './types.ts'
 
 // ===== 上游（100% OpenAI 标准，官方 SDK） =====
@@ -163,11 +163,15 @@ const formatTime = (ts: number): string => {
   const sign = off >= 0 ? '+' : '-'
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} (UTC${sign}${p(Math.floor(Math.abs(off) / 60))}:${p(Math.abs(off) % 60)})`
 }
-// developer 注入内容：当前时间（会话创建时）+ 用户记忆
+// 工具路由约定：只表达"选哪个工具"，具体参数/限制由各工具自己的描述说明，不在这里重复
+const TOOL_POLICY = `工具使用约定：文件读写、搜索、修改优先用 read、search、write、edit；pwsh 只用于执行命令。
+工作目录：${WORKSPACE_DIR}`
+// developer 注入内容：当前时间（会话创建时）+ 用户记忆 + 工具路由约定
 const devContent = (createdAt: number): string => {
   const parts = [`当前时间：${formatTime(createdAt)}`]
   const memories = readMemories()
   if (memories.length) parts.push(...memories)
+  parts.push(TOOL_POLICY)
   return parts.join('\n')
 }
 

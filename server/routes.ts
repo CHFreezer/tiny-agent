@@ -2,7 +2,7 @@ import express from 'express'
 import OpenAI from 'openai'
 import fs from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { DATA_DIR, SETTINGS_FILE, errMsg, readSettings } from './config.ts'
+import { DATA_DIR, SETTINGS_FILE, errMsg, normalizeEnv, readSettings } from './config.ts'
 import { readMemories, saveMemories } from './memories.ts'
 import {
   applyDelete,
@@ -68,7 +68,7 @@ export function registerRoutes(app: express.Express): void {
             name: c.name.trim().slice(0, 48),
             command: c.command.slice(0, 512),
             args: typeof c.args === 'string' ? c.args.slice(0, 1024) : '',
-            env: typeof c.env === 'string' ? c.env.slice(0, 1024) : '',
+            env: normalizeEnv(c.env),
             enabled: c.enabled !== false,
           }))
           .filter((c, i, a) => a.findIndex((x) => x.name === c.name) === i)

@@ -94,15 +94,6 @@ function splitArgs(s: string): string[] {
   return out
 }
 
-function parseEnv(s: string): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const part of s.split(';')) {
-    const i = part.indexOf('=')
-    if (i > 0) out[part.slice(0, i).trim()] = part.slice(i + 1).trim()
-  }
-  return out
-}
-
 function rebuildMcpToolMap(): void {
   mcpToolMap.clear()
   for (const e of mcpServers.values()) {
@@ -174,7 +165,7 @@ export function syncMcp(): Promise<void> {
             args: splitArgs(cfg.args),
             cwd: workdir,
             // TEMP 重定向到共享工作区（用户配置的 env 可覆盖）
-            env: Object.fromEntries(Object.entries({ ...process.env, TEMP: path.join(workdir, 'tmp'), TMP: path.join(workdir, 'tmp'), TMPDIR: path.join(workdir, 'tmp'), ...parseEnv(cfg.env) }).filter((v): v is [string, string] => v[1] !== undefined)),
+            env: Object.fromEntries(Object.entries({ ...process.env, TEMP: path.join(workdir, 'tmp'), TMP: path.join(workdir, 'tmp'), TMPDIR: path.join(workdir, 'tmp'), ...(cfg.env ?? {}) }).filter((v): v is [string, string] => v[1] !== undefined)),
             stderr: 'pipe',
           })
           e.transport = transport // 先登记：连接失败也能按进程树清理

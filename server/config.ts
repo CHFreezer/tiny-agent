@@ -1,6 +1,7 @@
 import path from 'node:path'
 import fs from 'node:fs'
 import type { McpServerConfig, Settings } from './types.ts'
+import { fsErrorText } from './fsError.ts'
 
 export const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
@@ -41,9 +42,7 @@ export function resolveCwd(input: unknown): { dir: string } | { error: string } 
     if (!fs.statSync(abs).isDirectory()) return { error: `cwd 不是目录: ${abs}` }
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code
-    return {
-      error: code === 'ENOENT' ? `cwd 不存在: ${abs}` : `cwd 不可用: ${abs}（${errMsg(err)}）`,
-    }
+    return { error: code === 'ENOENT' ? `cwd 不存在: ${abs}` : `cwd 不可用: ${fsErrorText(err, abs)}` }
   }
   return { dir: abs }
 }
@@ -69,13 +68,34 @@ process.on('unhandledRejection', (reason) => {
   process.exit(1)
 })
 
+// MCP 环境变量：新格式是键值对象；旧配置是 "K=V;K2=V2" 字符串，读取时统一归一化。
+// 键不允许空白/= 等会被误解析的字符；值保持原样（仅限字符串，限长、限量）。
+export function normalizeEnv(v: unknown): Record<string, string> {
+  if (typeof v === 'string') {
+    const out: Record<string, string> = {}
+    for (const part of v.split(';')) {
+      const i = part.indexOf('=')
+      if (i > 0) out[part.slice(0, i).trim()] = part.slice(i + 1).trim()
+    }
+    return out
+  }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return {}
+  const out: Record<string, string> = {}
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    if (typeof val !== 'string' || !k.trim() || /[\s=]/.test(k)) continue
+    out[k.trim().slice(0, 256)] = val.slice(0, 4096)
+    if (Object.keys(out).length >= 64) break
+  }
+  return out
+}
+
 export function readSettings(): Settings {
   const def: Settings = { baseUrl: '', mode: 'openai', model: '', effort: '', apiKey: '', mcp: [], maxContext: 0, maxTokens: 0, headers: {}, pwsh: false }
   try {
     const s = { ...def, ...(JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) as Partial<Settings>) }
     s.mcp = (Array.isArray(s.mcp) ? s.mcp : [])
       .filter((c): c is McpServerConfig => !!c && typeof c.name === 'string' && typeof c.command === 'string')
-      .map((c) => ({ ...c, enabled: c.enabled !== false }))
+      .map((c) => ({ ...c, env: normalizeEnv(c.env), enabled: c.enabled !== false }))
     // 请求头：只保留字符串键值（防止手改 settings.json 塞入非法结构）
     s.headers = s.headers && typeof s.headers === 'object' && !Array.isArray(s.headers)
       ? Object.fromEntries(Object.entries(s.headers).filter(([k, v]) => typeof k === 'string' && typeof v === 'string'))

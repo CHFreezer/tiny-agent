@@ -3,7 +3,8 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { diff as nodeDiff } from 'node:util'
 import iconv from 'iconv-lite'
-import { WORKSPACE_DIR, errMsg, resolveCwd } from './config.ts'
+import { WORKSPACE_DIR, resolveCwd } from './config.ts'
+import { fsErrorText } from './fsError.ts'
 import type { DiffBlock, DiffLine, EditDiff, ToolResult } from './types.ts'
 
 // ===== 文件工具：read（文本/十六进制）与 edit（单区间严格编辑） =====
@@ -37,8 +38,8 @@ function verifyOldBytes(raw: Buffer, offset: number, old: Buffer, label: string)
 }
 
 // ===== read =====
-// encoding：缺省 utf-8；"hex" 走十六进制；其余交给 TextDecoder（gbk/gb18030/big5/shift_jis/euc-kr/utf-16le 等）
-export function readTool(args: { path?: unknown; encoding?: unknown; line?: unknown; offset?: unknown; limit?: unknown; cwd?: unknown }): ToolResult {
+// encoding：缺省 utf-8；"hex" 走十六进制；其余按文本编码交给 TextDecoder（不支持时回退 iconv）
+export function readTool(args: { path?: unknown; encoding?: unknown; line?: unknown; offset?: unknown; limit?: unknown; bytes?: unknown; cwd?: unknown }): ToolResult {
   const raw = String(args.path ?? '').trim()
   if (!raw) return fail('读取失败: 缺少 path')
   const cwd = resolveCwd(args.cwd)
@@ -48,8 +49,11 @@ export function readTool(args: { path?: unknown; encoding?: unknown; line?: unkn
   const hasOffset = args.offset !== undefined && args.offset !== null && args.offset !== ''
   const hasLine = args.line !== undefined && args.line !== null && args.line !== ''
   const hasLimit = args.limit !== undefined && args.limit !== null && args.limit !== ''
-  if (encoding === 'hex' && hasLine) return fail('读取失败: hex 模式请用 offset，line 仅用于文本模式')
-  if (encoding !== 'hex' && hasOffset) return fail('读取失败: 文本模式请用 line，offset 仅用于 hex 模式')
+  const hasBytes = args.bytes !== undefined && args.bytes !== null && args.bytes !== ''
+  if (encoding === 'hex' && hasLine) return fail('读取失败: hex 模式不支持 line（line 仅用于文本模式）')
+  if (encoding !== 'hex' && hasOffset) return fail('读取失败: 文本模式不支持 offset（offset 仅用于 hex 模式）')
+  if (encoding === 'hex' && hasLimit) return fail('读取失败: hex 模式不支持 limit（limit 仅用于文本模式）')
+  if (encoding !== 'hex' && hasBytes) return fail('读取失败: 文本模式不支持 bytes（bytes 仅用于 hex 模式）')
   try {
     const st = fs.statSync(abs)
     if (!st.isFile()) return fail(`读取失败: 不是文件: ${abs}`)
@@ -59,7 +63,7 @@ export function readTool(args: { path?: unknown; encoding?: unknown; line?: unkn
     // 文本编码里只有 UTF-16/32 正常含 NUL；其它编码含 NUL 基本可以判定是二进制
     const nulAllowed = /^utf-?(16|32)/.test(encoding)
     if (!nulAllowed && buf.subarray(0, Math.min(buf.length, 8192)).includes(0)) {
-      return fail(`读取失败: 二进制文件（含 NUL）；查看原始字节请用 encoding:"hex": ${abs}`)
+      return fail(`读取失败: 二进制文件（含 NUL）: ${abs}`)
     }
     let text: string
     const enc = resolveEncoding(encoding, buf)
@@ -104,10 +108,10 @@ export function readTool(args: { path?: unknown; encoding?: unknown; line?: unkn
       bytes += size
     }
     const end = offset + out.length - 1
-    const footer = end < total ? `\n[共 ${total} 行，已显示 ${offset}-${end}；继续读取请用 line=${end + 1}]` : `\n[共 ${total} 行]`
+    const footer = end < total ? `\n[共 ${total} 行，已显示 ${offset}-${end}（下一段从第 ${end + 1} 行开始）]` : `\n[共 ${total} 行]`
     return { text: out.join('\n') + footer }
   } catch (err) {
-    return fail(`读取失败: ${errMsg(err)}`)
+    return fail(`读取失败: ${fsErrorText(err, abs)}`)
   }
 }
 
@@ -125,18 +129,18 @@ const clampLine = (line: string) => {
 }
 
 // HxD 风格：Offset(h) + 16 字节/行 hex + ASCII（非可打印字节显示 .）
-function readHex(abs: string, size: number, args: { offset?: unknown; limit?: unknown }): ToolResult {
+function readHex(abs: string, size: number, args: { offset?: unknown; bytes?: unknown }): ToolResult {
   const hasOffset = args.offset !== undefined && args.offset !== null && args.offset !== ''
-  const hasLimit = args.limit !== undefined && args.limit !== null && args.limit !== ''
+  const hasBytes = args.bytes !== undefined && args.bytes !== null && args.bytes !== ''
   const parsedOffset = hasOffset ? parseOffset(args.offset) : 0
   if (hasOffset && (!Number.isFinite(parsedOffset) || parsedOffset < 0 || (typeof args.offset === 'number' && !Number.isInteger(args.offset)))) {
     return fail(`读取失败: offset 必须是 ≥0 的整数（支持 0x）: ${String(args.offset)}`)
   }
-  const limitValue = Number(args.limit)
-  if (hasLimit && (!Number.isInteger(limitValue) || limitValue < 1)) {
-    return fail(`读取失败: limit 必须是 ≥1 的整数: ${String(args.limit)}`)
+  const bytesValue = Number(args.bytes)
+  if (hasBytes && (!Number.isInteger(bytesValue) || bytesValue < 1)) {
+    return fail(`读取失败: bytes 必须是 ≥1 的整数: ${String(args.bytes)}`)
   }
-  const limit = hasLimit ? Math.min(HEX_MAX_BYTES, limitValue) : HEX_DEFAULT_BYTES
+  const count = hasBytes ? Math.min(HEX_MAX_BYTES, bytesValue) : HEX_DEFAULT_BYTES
   if (size === 0) {
     const width = 8
     return {
@@ -145,7 +149,7 @@ function readHex(abs: string, size: number, args: { offset?: unknown; limit?: un
   }
   const offset = parsedOffset
   if (offset >= size) return fail(`offset=0x${offset.toString(16).toUpperCase()} 超出范围（文件共 ${size} 字节）: ${abs}`)
-  const len = Math.min(limit, size - offset)
+  const len = Math.min(count, size - offset)
   const fd = fs.openSync(abs, 'r')
   const buf = Buffer.alloc(len)
   try {
@@ -164,7 +168,7 @@ function readHex(abs: string, size: number, args: { offset?: unknown; limit?: un
   const end = offset + len
   const total = size.toString(16).toUpperCase()
   const footer = end < size
-    ? `[共 ${size} 字节 (0x${total})，已显示 0x${offset.toString(16).toUpperCase()}-0x${(end - 1).toString(16).toUpperCase()}；继续读取请用 offset=0x${end.toString(16).toUpperCase()}]`
+    ? `[共 ${size} 字节 (0x${total})，已显示 0x${offset.toString(16).toUpperCase()}-0x${(end - 1).toString(16).toUpperCase()}（下一段从 0x${end.toString(16).toUpperCase()} 开始）]`
     : `[共 ${size} 字节 (0x${total})，已显示到文件末尾]`
   return { text: out.join('\n') + '\n' + footer }
 }
@@ -475,7 +479,7 @@ function editText(
   const oldText = String(args.old ?? '')
   const newText = String(args.new ?? '')
   const replaceAll = args.replaceAll === true
-  if (!exists) throw new Error(`${file}: 文件不存在；创建文件请用 write`)
+  if (!exists) throw new Error(`${file}: 文件不存在`)
   const raw = readForEdit(abs, file)
   const enc = resolveEncoding(encoding, raw)
 
@@ -483,7 +487,7 @@ function editText(
   if (!oldText) {
     const hasLine = args.line !== undefined && args.line !== null && args.line !== ''
     if (!hasLine) {
-      if (raw.length > 0) throw new Error(`${file}: 文件非空时插入需要 line；创建文件请用 write`)
+      if (raw.length > 0) throw new Error(`${file}: 文件非空时插入需要 line`)
       const next = encodeTextStrict(newText, resolveEncoding(encoding, Buffer.alloc(0)), file)
       const diff = buildTextDiff(file, raw, next, enc)
       fs.writeFileSync(abs, next)
@@ -530,7 +534,7 @@ function editText(
   }
   if (!matches.length) {
     const where = args.line !== undefined && args.line !== null && args.line !== '' ? ` line=${String(args.line)} 之后` : '文件中'
-    throw new Error(`${file}: 找不到 old（按 ${encoding} 编码后在${where}无匹配；检查内容、编码或换行）`)
+    throw new Error(`${file}: 找不到 old（按 ${encoding} 编码后在${where}无匹配）`)
   }
 
   const parts: Buffer[] = []
@@ -552,8 +556,8 @@ function editHex(abs: string, file: string, exists: boolean, args: { offset?: un
   const oldBytes = parseHexValue(args.old, 'old')
   const newBytes = parseHexValue(args.new, 'new')
   const hasOffset = args.offset !== undefined && args.offset !== null && args.offset !== ''
-  if (!exists) throw new Error(`${file}: 文件不存在；创建文件请用 write`)
-  if (!hasOffset) throw new Error(`${file}: hex 模式必须提供 offset（0-based 字节偏移）；创建文件请用 write`)
+  if (!exists) throw new Error(`${file}: 文件不存在`)
+  if (!hasOffset) throw new Error(`${file}: hex 模式必须提供 offset（0-based 字节偏移）`)
   const raw = readForEdit(abs, file)
   const offset = parseOffset(args.offset)
   if (!Number.isFinite(offset) || offset < 0 || offset > raw.length) {
@@ -591,17 +595,19 @@ export function editTool(args: { path?: unknown; line?: unknown; offset?: unknow
     const next = args.new ?? ''
     const hasOffset = args.offset !== undefined && args.offset !== null && args.offset !== ''
     const hasLine = args.line !== undefined && args.line !== null && args.line !== ''
-    if (encoding === 'hex' && hasLine) throw new Error('hex 模式请用 offset，line 仅用于文本模式')
-    if (encoding !== 'hex' && hasOffset) throw new Error('文本模式请用 line，offset 仅用于 hex 模式')
+    if (encoding === 'hex' && hasLine) throw new Error('hex 模式不支持 line（line 仅用于文本模式）')
+    if (encoding !== 'hex' && hasOffset) throw new Error('文本模式不支持 offset（offset 仅用于 hex 模式）')
+    if (!String(old).length && !String(next).length) throw new Error('old 和 new 不能同时为空')
+    if (!String(old).length && args.replace_all === true) throw new Error('replace_all 只能用于替换（old 不能为空）')
     if (encoding === 'hex') return editHex(abs, file, exists, { offset: args.offset, old, new: next, replaceAll: args.replace_all })
     return editText(abs, file, exists, { line: args.line, old, new: next, encoding, replaceAll: args.replace_all })
   } catch (err) {
-    return fail(`编辑失败: ${errMsg(err)}`)
+    return fail(`编辑失败: ${fsErrorText(err, file)}`)
   }
 }
 
-// 创建新文件：目标已存在则失败（修改现有文件用 edit）；文本按 encoding 编码，hex 模式按字节写入
-export function writeTool(args: { path?: unknown; content?: unknown; encoding?: unknown; cwd?: unknown }): ToolResult {
+// 创建或整体覆盖文件：默认目标已存在则失败（局部修改用 edit）；overwrite=true 时整文件重写并附带 diff
+export function writeTool(args: { path?: unknown; content?: unknown; encoding?: unknown; cwd?: unknown; overwrite?: unknown }): ToolResult {
   const file = String(args.path ?? '').trim()
   if (!file) return fail('写入失败: 缺少 path')
   const encoding = normalizeEncoding(args.encoding)
@@ -609,20 +615,25 @@ export function writeTool(args: { path?: unknown; content?: unknown; encoding?: 
   if ('error' in cwd) return fail(`写入失败: ${cwd.error}`)
   const abs = toAbs(file, cwd.dir)
   try {
-    if (fs.existsSync(abs)) throw new Error(`${file}: 文件已存在；write 只用于创建新文件，修改请用 edit`)
+    const exists = fs.existsSync(abs)
+    if (exists) {
+      if (!fs.statSync(abs).isFile()) throw new Error(`${file}: 不是文件`)
+      if (args.overwrite !== true) throw new Error(`${file}: 文件已存在`)
+    }
     fs.mkdirSync(path.dirname(abs), { recursive: true })
     if (encoding === 'hex') {
       const buf = parseHexValue(args.content, 'content')
       fs.writeFileSync(abs, buf)
-      return { text: `Created ${file}` }
+      return { text: `${exists ? 'Overwrote' : 'Created'} ${file}` }
     }
     const content = String(args.content ?? '')
-    // 新建文件不自动写 BOM；需要 BOM 请用 encoding:"hex" 显式写入
-    const next = encodeTextStrict(content, resolveEncoding(encoding, Buffer.alloc(0)), file)
-    const diff = buildTextDiff(file, Buffer.alloc(0), next, encoding)
+    // 新建文件不自动写 BOM；覆盖时沿用原文件内容做编码/BOM 判定（需要 BOM 请用 hex 显式写入）
+    const raw = exists ? fs.readFileSync(abs) : Buffer.alloc(0)
+    const next = encodeTextStrict(content, resolveEncoding(encoding, raw), file)
+    const diff = buildTextDiff(file, raw, next, encoding)
     fs.writeFileSync(abs, next)
-    return diff.blocks.length ? { text: `Created ${file}`, diff } : { text: `Created ${file}` }
+    return diff.blocks.length ? { text: `${exists ? 'Overwrote' : 'Created'} ${file}`, diff } : { text: `${exists ? 'Overwrote' : 'Created'} ${file}` }
   } catch (err) {
-    return fail(`写入失败: ${errMsg(err)}`)
+    return fail(`写入失败: ${fsErrorText(err, file)}`)
   }
 }

@@ -106,7 +106,9 @@ export function MessageList({
         className="message-list h-full"
         data={[...history, null]}
         initialTopMostItemIndex={Math.max(0, history.length - 1)}
-        followOutput="smooth"
+        // 跟随输出：内容频繁增长（工具参数流、工具结果、正文流）时不能用 smooth——
+        // 平滑动画赶不上高度变化，中途 isAtBottom 会短暂为 false，导致跟随被判定为"用户上滚"而脱靶。
+        followOutput={(atBottom) => (atBottom ? 'auto' : false)}
         alignToBottom
         itemContent={(index, entry) =>
           entry == null ? (

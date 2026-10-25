@@ -91,7 +91,7 @@ export interface McpServerConfig {
   name: string
   command: string
   args: string
-  env: string
+  env: Record<string, string> // 环境变量键值（键值对象，UI 按行编辑）
   enabled: boolean // 工具是否加入模型上下文
 }
 

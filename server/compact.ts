@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { errMsg, readSettings } from './config.ts'
 import { saveSession } from './sessions.ts'
 import { buildChatRequest, getOpenAI, upstreamRequest } from './upstream.ts'
+import { stallGuard } from './stall.ts'
 import type { Entry, Session, Usage } from './types.ts'
 
 // ===== 自动上下文压缩 =====
@@ -66,18 +67,25 @@ export async function compactContext(session: Session, w: (o: unknown) => void, 
   let full = ''
   let finish: string | null = null
   let streamErr: string | null = null
+  // 与主生成同一条停滞策略：prefill（等首包）给足时间，首包后长时间无输出才判定卡死。
+  // 没有这层保护时，上游"回了响应头就不再吐数据"会让整轮生成永久停在压缩阶段。
+  const guard = stallGuard(signal)
   try {
     // 输入 = 当前有效上下文（排除本气泡，沿用已有分割点）+ 摘要指令
     // 与主请求共用 buildChatRequest 构建，前缀/tools 完全一致避免 cache miss
+    guard.arm()
     const stream = await getOpenAI(s.baseUrl, s.apiKey).chat.completions.create(
       buildChatRequest({
         history: session.history.filter((e) => e.id !== entry.id),
         extra: [{ role: 'user', content: SUMMARY_PROMPT }],
         createdAt: session.createdAt,
       }),
-      upstreamRequest(signal),
+      upstreamRequest(guard.signal),
     )
+    guard.arm()
     for await (const chunk of stream) {
+      guard.markChunk()
+      guard.arm()
       if (signal.aborted) break
       const choice = chunk.choices?.[0]
       if (choice?.delta?.content) {
@@ -88,7 +96,9 @@ export async function compactContext(session: Session, w: (o: unknown) => void, 
       addUsage(usage, chunk.usage)
     }
   } catch (err) {
-    if (!signal.aborted) streamErr = errMsg(err)
+    if (!signal.aborted) streamErr = guard.stalled() ? guard.reason() : errMsg(err)
+  } finally {
+    guard.dispose()
   }
   // 输出被截断（length）/报错/空/被用户停止 → 失败：保留已输出内容展示，但不是有效分割点。
   // 停止时必须算失败：半截摘要若成为分割点，后续上下文会被静默截断成残缺摘要。

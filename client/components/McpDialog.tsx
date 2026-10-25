@@ -1,5 +1,5 @@
-import { Plug, PlugZap } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { Plug, PlugZap, Plus, X } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -16,7 +16,14 @@ import { Switch } from '@/components/ui/switch'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import type { McpServerConfig, McpServerStatus, Settings } from '@/lib/types'
 
-const EMPTY: McpServerConfig = { name: '', command: '', args: '', env: '', enabled: true }
+const EMPTY: McpServerConfig = { name: '', command: '', args: '', env: {}, enabled: true }
+
+// 环境变量 UI 行：id 只用于 React 列表稳定（删行后输入框不串位）
+interface EnvRow {
+  id: number
+  key: string
+  value: string
+}
 
 function StatusChip({ status }: { status: McpServerStatus | undefined }) {
   if (!status) {
@@ -58,6 +65,10 @@ export function McpDialog({
   editing: McpServerConfig | null
 }) {
   const [row, setRow] = useState<McpServerConfig>(EMPTY)
+  const envSeq = useRef(0)
+  const makeEnvRows = (env: Record<string, string> | undefined): EnvRow[] =>
+    Object.entries(env ?? {}).map(([key, value]) => ({ id: envSeq.current++, key, value }))
+  const [envRows, setEnvRows] = useState<EnvRow[]>([])
   const [status, setStatus] = useState<McpServerStatus | undefined>()
   const [busyConn, setBusyConn] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -68,6 +79,7 @@ export function McpDialog({
   useEffect(() => {
     if (!open) return
     setRow(editing ? { ...editing } : { ...EMPTY })
+    setEnvRows(makeEnvRows(editing?.env))
     setMsg('')
     const name = (editing?.name ?? '').trim()
     void fetchMcp()
@@ -77,6 +89,12 @@ export function McpDialog({
   }, [open, editing])
 
   const patch = (p: Partial<McpServerConfig>) => setRow((r) => ({ ...r, ...p }))
+
+  // 环境变量行操作
+  const addEnv = () => setEnvRows((rows) => [...rows, { id: envSeq.current++, key: '', value: '' }])
+  const updateEnv = (id: number, field: 'key' | 'value', v: string) =>
+    setEnvRows((rows) => rows.map((r) => (r.id === id ? { ...r, [field]: v } : r)))
+  const removeEnv = (id: number) => setEnvRows((rows) => rows.filter((r) => r.id !== id))
 
   const recheck = async () => {
     setBusyConn(true)
@@ -98,11 +116,27 @@ export function McpDialog({
       setMsg('名称和命令不能为空')
       return
     }
+    // 空行忽略；名称不能为空、不能含空白/等号；同名后者覆盖
+    const env: Record<string, string> = {}
+    for (const r of envRows) {
+      const k = r.key.trim()
+      const v = r.value.trim()
+      if (!k && !v) continue
+      if (!k) {
+        setMsg('环境变量名称不能为空')
+        return
+      }
+      if (/[\s=]/.test(k)) {
+        setMsg(`环境变量名称不合法：${k}`)
+        return
+      }
+      env[k] = v
+    }
     // 按原名移出旧条目（改名=删旧加新），并按新名去重
     const origName = (editing?.name ?? '').trim()
     const mcp = [
       ...settings.mcp.filter((c) => c.name.trim() !== origName && c.name.trim() !== name),
-      { ...EMPTY, ...row, name, command },
+      { ...EMPTY, ...row, name, command, env },
     ]
     setSaving(true)
     setMsg('')
@@ -132,7 +166,7 @@ export function McpDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>{editing ? `MCP 工具：${editing.name}` : 'MCP 工具：新服务器'}</DialogTitle>
           <DialogDescription>
@@ -169,13 +203,37 @@ export function McpDialog({
               spellCheck={false}
               className="h-8 font-mono text-xs"
             />
-            <Input
-              value={row.env}
-              onChange={(e) => patch({ env: e.target.value })}
-              placeholder="环境变量（可选，分号分隔，如 KEY=value;K2=v2）"
-              spellCheck={false}
-              className="h-8 font-mono text-xs"
-            />
+          </div>
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-muted-foreground">环境变量（可选）</span>
+              <Button type="button" variant="outline" size="sm" onClick={addEnv}>
+                <Plus className="size-3.5" />
+                添加
+              </Button>
+            </div>
+            {envRows.map((r) => (
+              <div key={r.id} className="flex items-center gap-2">
+                <Input
+                  value={r.key}
+                  onChange={(e) => updateEnv(r.id, 'key', e.target.value)}
+                  placeholder="名称（如 GITHUB_TOKEN）"
+                  spellCheck={false}
+                  className="h-8 flex-1 font-mono text-xs"
+                />
+                <Input
+                  value={r.value}
+                  onChange={(e) => updateEnv(r.id, 'value', e.target.value)}
+                  placeholder="值"
+                  spellCheck={false}
+                  className="h-8 flex-1 font-mono text-xs"
+                />
+                <Button type="button" variant="ghost" size="icon-sm" title="删除" onClick={() => removeEnv(r.id)}>
+                  <X className="size-4" />
+                </Button>
+              </div>
+            ))}
+            {envRows.length === 0 && <span className="text-xs text-muted-foreground">暂无，点击「添加」新增一行</span>}
           </div>
         </div>
         <div className="flex items-center gap-2">

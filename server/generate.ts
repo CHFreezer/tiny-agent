@@ -7,6 +7,7 @@ import { buildChatRequest, getOpenAI, upstreamRequest } from './upstream.ts'
 import { executeTool } from './tools.ts'
 import { storeImage } from './images.ts'
 import { addUsage, compactContext } from './compact.ts'
+import { stallGuard } from './stall.ts'
 import type { Entry, Session, ToolCall, Usage } from './types.ts'
 
 // ===== 生成核心：服务端驱动流式、把条目写进会话、写穿磁盘 =====
@@ -59,37 +60,28 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
       saveSession(session)
       w({ h: session.history })
     }
-    // 上游停滞保护：生成阶段 120 秒无输出即中止（上游卡死会把会话永久锁在生成中）；
-    // prefill 阶段（首 chunk 前）放宽到 600 秒——大上下文 prefill 可达数分钟（~1000 tps × 20 万 token ≈ 200s）
-    const stallCtl = new AbortController()
-    const onUserAbort = () => stallCtl.abort()
-    opts.signal.addEventListener('abort', onUserAbort)
-    let stallTimer: NodeJS.Timeout | undefined
-    let stalled = false
-    let gotFirstChunk = false
-    const armStall = () => {
-      clearTimeout(stallTimer)
-      stallTimer = setTimeout(() => {
-        stalled = true
-        stallCtl.abort()
-      }, gotFirstChunk ? 120_000 : 600_000)
-    }
+    // 上游停滞保护：prefill（等首包）与流式停顿分开计时（见 stall.ts）
+    const guard = stallGuard(opts.signal)
     const t0 = Date.now() // 本轮请求起点：空流时区分 prefill 超时与模型真空输出
     try {
       const baseBefore = usage.prompt
       const completionBefore = usage.completion
+      // 响应头到达前就开始计时：本地模型 prefill 可能很久，但必须有上界
+      guard.arm()
       const stream = await getOpenAI(s.baseUrl, s.apiKey).chat.completions.create(
         buildChatRequest({
           history: session.history.slice(0, pos),
           createdAt: session.createdAt,
         }),
-        upstreamRequest(stallCtl.signal),
+        upstreamRequest(guard.signal),
       )
-      armStall()
+      guard.arm()
       for await (const chunk of stream) {
-        gotFirstChunk = true
-        armStall()
+        guard.markChunk()
+        guard.arm()
         if (opts.signal.aborted) break
+        // usage 在末尾 chunk 里，通常 choices 为空；必须在 delta 判空之前统计
+        addUsage(usage, chunk.usage)
         const delta = chunk.choices?.[0]?.delta as (OpenAI.Chat.ChatCompletionChunk.Choice.Delta & { reasoning_content?: string; reasoning?: string }) | undefined
         if (!delta) continue
         // 思考字段兼容：本地 llama.cpp 回 reasoning_content，commandcode 网关回 reasoning
@@ -115,7 +107,6 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
           if (tc.function?.arguments) o.a = tc.function.arguments
           w({ id: entry.id, t: o })
         }
-        addUsage(usage, chunk.usage)
       }
       roundBase = usage.prompt - baseBefore // 本次请求的精确 prompt token 数（上游不支持 usage 时为 0）
       lastCompletion = usage.completion - completionBefore
@@ -136,10 +127,9 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
         w({ d: 1, title: session.title, history: session.history, lastPromptTokens: session.lastPromptTokens, lastCompletionTokens: session.lastCompletionTokens })
         return null
       }
-      failed = stalled ? '上游生成停滞（120 秒无输出），已中止' : errMsg(err)
+      failed = guard.stalled() ? guard.reason() : errMsg(err)
     } finally {
-      clearTimeout(stallTimer)
-      opts.signal.removeEventListener('abort', onUserAbort)
+      guard.dispose()
     }
     // 当轮结束：条目定稿入库；无任何输出（失败或空完成）时移除空条目——空 assistant 消息会污染/拒绝上游
     entry.content = full || null
@@ -178,8 +168,15 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
         if (r.diff) te.diff = r.diff
         if (r.search) te.search = r.search
         if (r.isError) te.error = true
-      } catch {
-        out = '(已停止)'
+      } catch (err) {
+        // executeTool 只在用户停止时向上抛；其他异常属于意外错误，要标红而不是伪装成"已停止"
+        if (opts.signal.aborted) {
+          out = '(已停止)'
+        } else {
+          console.error('[tool] unexpected error', err)
+          out = '工具执行异常'
+          te.error = true
+        }
       }
       te.content = out
       saveSession(session)

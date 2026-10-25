@@ -178,8 +178,10 @@ export function EntryContent({
     // 带结构化 diff 时，正文里的 unified diff 只给模型；前端只显示首行摘要，避免重复
     const display = entry.diff ? content.split('\n')[0] : content
     const isMcpError = content.startsWith('(MCP 返回错误)') || content.startsWith('MCP 工具执行失败')
-    // isError 由服务端工具结果给出（pwsh 非零退出/超时/启动失败、文件工具失败等）；兼容旧数据的 MCP 前缀
-    const isError = isMcpError || entry.error === true
+    // 兼容旧数据：结构化 error 标记上线前，pwsh 失败只在正文前加状态前缀
+    const isLegacyPwshError = /^\[(退出码 \d+|超时|启动失败|进程被终止)\]/.test(content)
+    // isError 由服务端工具结果给出（pwsh 非零退出/超时/启动失败、文件工具失败等）；兼容旧数据的 MCP/pwsh 前缀
+    const isError = isMcpError || isLegacyPwshError || entry.error === true
     // hex dump 依赖列对齐；read 文本是 cat -n（行号 + Tab），两者都不能走 markdown
     const isHexDump = content.startsWith('Offset(h)')
     const isReadText = /^\s*\d+\t/.test(content)
