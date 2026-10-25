@@ -217,11 +217,13 @@ interface NameScan {
   error?: string
 }
 
-// rg --files 流式枚举文件名；路径是文件时直接检查 basename
-function scanNames(abs: string, isDir: boolean, cwd: string, pattern: string, nameOpts: NameOpts, maxHits: number, timeoutMs: number, rg: string, includes: string[], excludes: string[]): Promise<NameScan> {
+// rg --files 流式枚举文件名；路径是文件时直接检查 basename。
+// 目录搜索时 rg 的 cwd 设为搜索根（path），这样 include/exclude glob 的锚定基准与文档一致：
+// 不以 ** 或 / 开头的模式锚定搜索根（rg 的 glob 默认相对 cwd 匹配）。
+function scanNames(abs: string, isDir: boolean, toolCwd: string, pattern: string, nameOpts: NameOpts, maxHits: number, timeoutMs: number, rg: string, includes: string[], excludes: string[]): Promise<NameScan> {
   const hits = new Map<string, SearchFile>()
   if (!isDir) {
-    const display = displayPath(cwd, abs)
+    const display = displayPath(toolCwd, abs)
     const ranges = nameRangesOf(display, pattern, nameOpts)
     if (ranges) hits.set(display, { path: display, nameMatch: true, nameRanges: ranges, matches: [] })
     return Promise.resolve({ hits, truncated: false, timedOut: false })
@@ -242,11 +244,11 @@ function scanNames(abs: string, isDir: boolean, cwd: string, pattern: string, na
           ...includes.flatMap((g) => ['--glob', g]),
           ...excludes.flatMap((g) => ['--glob', `!${g}`]),
           '--',
-          abs,
+          '.',
         ]
       : ['--files', '--no-config', '--', abs]
     const child = spawn(rg, args, {
-      cwd,
+      cwd: isDir ? abs : toolCwd,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -262,7 +264,7 @@ function scanNames(abs: string, isDir: boolean, cwd: string, pattern: string, na
     }, timeoutMs)
     const split = lineSplitter((line) => {
       if (stopped || hits.size >= maxHits) return
-      const display = displayPath(cwd, line)
+      const display = displayPath(toolCwd, path.resolve(abs, line))
       const ranges = nameRangesOf(display, pattern, nameOpts)
       if (!ranges) return
       hits.set(display, { path: display, nameMatch: true, nameRanges: ranges, matches: [] })
@@ -296,8 +298,9 @@ interface ContentScan {
   error?: string
 }
 
-// rg --json 流式内容搜索；达到 remaining 或超时 kill
-function scanContent(pattern: string, abs: string, cwd: string, remaining: number, timeoutMs: number, rg: string, isDir: boolean, includes: string[], excludes: string[], opts: { mode: 'literal' | 'regex'; ignoreCase: boolean; wholeWord: boolean; context: number; encoding?: string }): Promise<ContentScan> {
+// rg --json 流式内容搜索；达到 remaining 或超时 kill。
+// 目录搜索时 rg 的 cwd 设为搜索根（path），让 include/exclude glob 锚定搜索根。
+function scanContent(pattern: string, abs: string, toolCwd: string, remaining: number, timeoutMs: number, rg: string, isDir: boolean, includes: string[], excludes: string[], opts: { mode: 'literal' | 'regex'; ignoreCase: boolean; wholeWord: boolean; context: number; encoding?: string }): Promise<ContentScan> {
   return new Promise((resolve) => {
     const files = new Map<string, SearchFile>()
     let total = 0
@@ -324,10 +327,10 @@ function scanContent(pattern: string, abs: string, cwd: string, remaining: numbe
       ...excludes.flatMap((g) => ['--glob', `!${g}`]),
     ]
     const args = isDir
-      ? [...common, '--hidden', '--no-require-git', ...globArgs, '--', pattern, abs]
+      ? [...common, '--hidden', '--no-require-git', ...globArgs, '--', pattern, '.']
       : [...common, '--', pattern, abs]
     const child = spawn(rg, args, {
-      cwd,
+      cwd: isDir ? abs : toolCwd,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -381,7 +384,7 @@ function scanContent(pattern: string, abs: string, cwd: string, remaining: numbe
       const lineText = bytesOrText(lineObj)
       if (!p || !lineText) return
       const text = lineText.replace(/\r?\n$/, '')
-      const display = displayPath(cwd, p)
+      const display = displayPath(toolCwd, isDir ? path.resolve(abs, p) : path.isAbsolute(p) ? p : path.resolve(toolCwd, p))
       const file = files.get(display) ?? { path: display, matches: [] as SearchLine[] }
       if (type === 'context') {
         const clamped = clampLine(text, [])
