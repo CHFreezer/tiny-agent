@@ -167,6 +167,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
         if (r.images?.length) te.images = r.images.map((src) => storeImage(session.id, src))
         if (r.diff) te.diff = r.diff
         if (r.search) te.search = r.search
+        if (r.plain) te.plain = true
         if (r.isError) te.error = true
       } catch (err) {
         // executeTool 只在用户停止时向上抛；其他异常属于意外错误，要标红而不是伪装成"已停止"
@@ -180,7 +181,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
       }
       te.content = out
       saveSession(session)
-      w({ x: te.id, r: out, tc: tc.id, ...(te.images ? { imgs: te.images } : {}), ...(te.diff ? { diff: te.diff } : {}), ...(te.search ? { search: te.search } : {}), ...(te.error ? { err: true } : {}) })
+      w({ x: te.id, r: out, tc: tc.id, ...(te.images ? { imgs: te.images } : {}), ...(te.diff ? { diff: te.diff } : {}), ...(te.search ? { search: te.search } : {}), ...(te.plain ? { plain: true } : {}), ...(te.error ? { err: true } : {}) })
     }
     if (opts.signal.aborted) break
     // 压缩必须等本轮所有工具结果落库之后：summary 若插在 assistant.tool_calls 与其工具结果之间，

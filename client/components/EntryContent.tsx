@@ -182,9 +182,10 @@ export function EntryContent({
     const isLegacyPwshError = /^\[(退出码 \d+|超时|启动失败|进程被终止)\]/.test(content)
     // isError 由服务端工具结果给出（pwsh 非零退出/超时/启动失败、文件工具失败等）；兼容旧数据的 MCP/pwsh 前缀
     const isError = isMcpError || isLegacyPwshError || entry.error === true
-    // hex dump 依赖列对齐；read 文本是 cat -n（行号 + Tab），两者都不能走 markdown
+    // hex dump 依赖列对齐；read 文本是 cat -n（行号 + Tab），两者都不能走 markdown；
+    // tail 读取没有行号，靠服务端的 plain 标记识别
     const isHexDump = content.startsWith('Offset(h)')
-    const isReadText = /^\s*\d+\t/.test(content)
+    const isReadText = entry.plain === true || /^\s*\d+\t/.test(content)
     const isPlain = isHexDump || isReadText
     return (
       <>
@@ -197,8 +198,8 @@ export function EntryContent({
           plain={isPlain || entry.live}
           nowrap={isHexDump}
           previewClass={entry.live ? 'h-24 leading-5 whitespace-pre-wrap' : undefined}
-          // 静态文件内容从开头展示，不贴底（pwsh/MCP 等流式结果保持贴底）
-          tail={!isPlain}
+          // tail 读取跟随末尾；带行号的 read / hex dump 从头展示；其他工具结果贴底
+          tail={entry.plain === true || (!isReadText && !isHexDump)}
         />
         {entry.diff && <DiffView diff={entry.diff} />}
         {entry.images?.map((url, i) => (

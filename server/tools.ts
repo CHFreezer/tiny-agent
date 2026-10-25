@@ -20,6 +20,7 @@ const READ_TOOL: OpenAI.Chat.ChatCompletionTool = {
     name: 'read',
     description: `读取文件。encoding 默认 "utf-8"；encoding:"hex" 为十六进制模式（地址 + 16 字节/行 + ASCII）。
 - 文本：line = 起始行（1-based，默认 1），limit = 行数（默认/上限 2000）；输出 cat -n 风格（行号右对齐 + Tab）
+- 文本末尾：tail = 最后 N 行（1-2000，不输出行号；与 line/limit 互斥）
 - hex：offset = 字节偏移（0-based，支持 0x，默认 0），bytes = 字节数（默认 1024，上限 4096）
 编码支持 iconv-lite 标签。路径相对 cwd（默认 workspace 根目录，也支持绝对路径）。`,
     parameters: {
@@ -31,6 +32,7 @@ const READ_TOOL: OpenAI.Chat.ChatCompletionTool = {
         offset: { type: ['number', 'string'], description: 'hex：字节偏移（0-based，支持 0x，默认 0）' },
         limit: { type: 'number', description: '文本：行数（默认/上限 2000）' },
         bytes: { type: 'number', description: 'hex：字节数（默认 1024，上限 4096）' },
+        tail: { type: 'number', description: '文本：从末尾读取的行数（1-2000，不输出行号，与 line/limit 互斥）' },
         cwd: { type: 'string', description: '工作目录覆盖（必须已存在；相对路径基于 workspace，省略=workspace）' },
       },
       required: ['path'],
@@ -42,7 +44,7 @@ const EDIT_TOOL: OpenAI.Chat.ChatCompletionTool = {
   function: {
     name: 'edit',
     description: `修改现有文件。
-文本：old 空/省略=插入（无 line 仅空文件；有 line 插到该行行首，new 需自带换行；行数+1=末尾，仅当文件以换行结尾）；否则替换 old，new 空=删除；多处默认修改第一处，replace_all 全部；换行按输入原样匹配。
+文本：old 空/省略=插入（无 line 仅空文件；有 line 插到该行行首，new 需自带换行；行数+1=末尾，仅当文件以换行结尾）；否则替换 old，new 空=删除；多处默认修改第一处，replace_all 全部；old/new 按字节精确匹配。
 hex：offset 必填，old/new 为十六进制字节；old 空=插入，new 空=删除；replace_all、line 不可用。
 路径相对 cwd（默认 workspace 根目录）。`,
     parameters: {

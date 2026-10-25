@@ -15,6 +15,7 @@ const MAX_READ_LINES = 2000
 const MAX_READ_BYTES = 50 * 1024
 const MAX_LINE_CHARS = 2000
 const MAX_FILE_BYTES = 10 * 1024 * 1024
+const MAX_TAIL_SCAN_BYTES = 16 * 1024 * 1024 // tail 反向窗口上限（只读文件末尾，不加载整个文件）
 const MAX_EDIT_BYTES = 64 * 1024 * 1024
 const HEX_DEFAULT_BYTES = 1024
 const HEX_MAX_BYTES = 4096
@@ -39,7 +40,7 @@ function verifyOldBytes(raw: Buffer, offset: number, old: Buffer, label: string)
 
 // ===== read =====
 // encoding：缺省 utf-8；"hex" 走十六进制；其余按文本编码交给 TextDecoder（不支持时回退 iconv）
-export function readTool(args: { path?: unknown; encoding?: unknown; line?: unknown; offset?: unknown; limit?: unknown; bytes?: unknown; cwd?: unknown }): ToolResult {
+export function readTool(args: { path?: unknown; encoding?: unknown; line?: unknown; offset?: unknown; limit?: unknown; bytes?: unknown; tail?: unknown; cwd?: unknown }): ToolResult {
   const raw = String(args.path ?? '').trim()
   if (!raw) return fail('读取失败: 缺少 path')
   const cwd = resolveCwd(args.cwd)
@@ -50,14 +51,22 @@ export function readTool(args: { path?: unknown; encoding?: unknown; line?: unkn
   const hasLine = args.line !== undefined && args.line !== null && args.line !== ''
   const hasLimit = args.limit !== undefined && args.limit !== null && args.limit !== ''
   const hasBytes = args.bytes !== undefined && args.bytes !== null && args.bytes !== ''
+  const hasTail = args.tail !== undefined && args.tail !== null && args.tail !== ''
   if (encoding === 'hex' && hasLine) return fail('读取失败: hex 模式不支持 line（line 仅用于文本模式）')
   if (encoding !== 'hex' && hasOffset) return fail('读取失败: 文本模式不支持 offset（offset 仅用于 hex 模式）')
   if (encoding === 'hex' && hasLimit) return fail('读取失败: hex 模式不支持 limit（limit 仅用于文本模式）')
   if (encoding !== 'hex' && hasBytes) return fail('读取失败: 文本模式不支持 bytes（bytes 仅用于 hex 模式）')
+  if (encoding === 'hex' && hasTail) return fail('读取失败: hex 模式不支持 tail')
+  if (hasTail && (hasLine || hasLimit)) return fail('读取失败: tail 不能与 line/limit 同时使用')
   try {
     const st = fs.statSync(abs)
     if (!st.isFile()) return fail(`读取失败: 不是文件: ${abs}`)
     if (encoding === 'hex') return readHex(abs, st.size, args)
+    if (hasTail) {
+      const tailValue = Math.floor(Number(args.tail))
+      if (!Number.isInteger(tailValue) || tailValue < 1) return fail(`读取失败: tail 必须是 ≥1 的整数: ${String(args.tail)}`)
+      return readTail(abs, st.size, encoding, Math.min(tailValue, MAX_READ_LINES))
+    }
     if (st.size > MAX_FILE_BYTES) return fail(`读取失败: 文件过大（${st.size} 字节，上限 ${MAX_FILE_BYTES}）: ${abs}`)
     const buf = fs.readFileSync(abs)
     // 文本编码里只有 UTF-16/32 正常含 NUL；其它编码含 NUL 基本可以判定是二进制
@@ -108,13 +117,86 @@ export function readTool(args: { path?: unknown; encoding?: unknown; line?: unkn
       bytes += size
     }
     const end = offset + out.length - 1
-    const footer = end < total ? `\n[共 ${total} 行，已显示 ${offset}-${end}（下一段从第 ${end + 1} 行开始）]` : `\n[共 ${total} 行]`
+    const footer = end < total
+      ? `\n[共 ${total} 行，已显示 ${offset}-${end}（下一段从第 ${end + 1} 行开始）]`
+      : `\n[共 ${total} 行]`
     return { text: out.join('\n') + footer }
   } catch (err) {
     return fail(`读取失败: ${fsErrorText(err, abs)}`)
   }
 }
 
+// 从文件末尾读取最后 N 行：只读尾部窗口（不够时翻倍扩大），不加载整个文件；不输出行号。
+// 反向窗口从任意位置开始时，第一行可能是残行，丢弃后仍保证拿到 N 行。
+function readTail(abs: string, size: number, encoding: string, tail: number): ToolResult {
+  if (size === 0) return { text: `(文件为空: ${abs})`, plain: true }
+  const fd = fs.openSync(abs, 'r')
+  try {
+    // 文件头只用于 BOM/编码判定和二进制检测
+    const headLen = Math.min(size, 8192)
+    const head = Buffer.alloc(headLen)
+    fs.readSync(fd, head, 0, headLen, 0)
+    const nulAllowed = /^utf-?(16|32)/.test(encoding)
+    if (!nulAllowed && head.includes(0)) return fail(`读取失败: 二进制文件（含 NUL）: ${abs}`)
+    const enc = resolveEncoding(encoding, head)
+    const unit = eolSpecOf(enc, head).unit
+
+    let window = Math.min(size, 64 * 1024)
+    let start = 0
+    let text = ''
+    let scanCapped = false
+    for (;;) {
+      start = Math.max(0, size - window)
+      start -= start % unit // UTF-16/32 对齐到码元边界
+      const len = size - start
+      const buf = Buffer.alloc(len)
+      let read = 0
+      while (read < len) {
+        const n = fs.readSync(fd, buf, read, len - read, start + read)
+        if (n <= 0) break
+        read += n
+      }
+      text = decodeLenient(buf.subarray(0, read), enc)
+      if (start === 0) {
+        text = text.replace(/^﻿/, '')
+        break
+      }
+      // 窗口从行中间开始时首行是残行：需要多一行才能保证丢弃后仍有 tail 行
+      if (splitTextLines(text).length - 1 >= tail) break
+      if (len >= MAX_TAIL_SCAN_BYTES) {
+        scanCapped = true
+        break
+      }
+      window = Math.min(window * 2, MAX_TAIL_SCAN_BYTES)
+    }
+
+    let lines = splitTextLines(text)
+    if (start > 0) lines = lines.slice(1) // 丢掉残行
+    const picked = lines.slice(-tail).map(clampLine)
+    // 从末尾往前收集，保证输出的是最新的行
+    const kept: string[] = []
+    let bytes = 0
+    for (let i = picked.length - 1; i >= 0; i--) {
+      const add = Buffer.byteLength(picked[i], 'utf8') + (kept.length ? 1 : 0)
+      if (kept.length && bytes + add > MAX_READ_BYTES) break
+      kept.push(picked[i])
+      bytes += add
+    }
+    kept.reverse()
+    const byteCapped = kept.length < picked.length
+    const notes = [
+      scanCapped ? `扫描上限 ${MAX_TAIL_SCAN_BYTES / 1024 / 1024}MB` : '',
+      byteCapped ? `输出上限 ${MAX_READ_BYTES / 1024}KB` : '',
+      start === 0 && lines.length < tail ? `文件不足 ${tail} 行` : '',
+    ].filter(Boolean)
+    const footer = `[文件末尾 ${kept.length} 行${notes.length ? `（${notes.join('；')}）` : ''}]`
+    return { text: (kept.length ? kept.join('\n') + '\n' : '') + footer, plain: true }
+  } catch (err) {
+    return fail(`读取失败: ${fsErrorText(err, abs)}`)
+  } finally {
+    fs.closeSync(fd)
+  }
+}
 // 按码点截断：避免把一个 emoji/生僻字（UTF-16 代理对）劈成两半
 const clampLine = (line: string) => {
   if (line.length <= MAX_LINE_CHARS) return line
@@ -523,7 +605,7 @@ function editText(
     searchFrom = starts[line - 1]
   }
 
-  // 严格按模型提供的字符编码成字节；不做 LF/CRLF 转换
+  // 严格按模型提供的字符编码成字节后匹配
   const oldBytes = encodeTextStrict(oldText, enc, file)
   const newBytes = newText === '' ? Buffer.alloc(0) : encodeTextStrict(newText, enc, file)
 

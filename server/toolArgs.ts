@@ -82,6 +82,7 @@ export const READ_ARGS: Record<string, ArgSpec> = {
   offset: { type: 'number|string' },
   limit: { type: 'integer', min: 1, max: 2000 },
   bytes: { type: 'integer', min: 1, max: 4096 },
+  tail: { type: 'integer', min: 1, max: 2000 },
   cwd: { type: 'string' },
 }
 

@@ -18,6 +18,7 @@ interface StreamEvent {
   imgs?: string[]
   diff?: EditDiff
   search?: SearchResult
+  plain?: boolean // 工具结果按纯文本展示（read 的 tail 输出）
   err?: boolean // 工具结果失败（x 带 r 时下发；前端标红）
   m?: { id: string; pos?: number; ok?: boolean; err?: string }
   tc?: string
@@ -238,7 +239,7 @@ export function useChat(effort: string, onError: (message: string) => void, onNo
             if (m.r !== undefined) {
               // 定稿：规范化文本整体替换实时输出
               patchView(sessionId, { executingId: null, genId: xid })
-              patchEntry(sessionId, xid, { content: m.r, live: false, ...(m.imgs ? { images: m.imgs } : {}), ...(m.diff ? { diff: m.diff } : {}), ...(m.search ? { search: m.search } : {}), ...(m.err ? { error: true } : {}) })
+              patchEntry(sessionId, xid, { content: m.r, live: false, ...(m.imgs ? { images: m.imgs } : {}), ...(m.diff ? { diff: m.diff } : {}), ...(m.search ? { search: m.search } : {}), ...(m.plain ? { plain: true } : {}), ...(m.err ? { error: true } : {}) })
             } else if (m.o !== undefined) {
               // 实时输出增量：追加到工具结果条目（服务端结束时用 r 覆盖）
               const chunk = m.o

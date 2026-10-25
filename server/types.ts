@@ -15,6 +15,7 @@ export interface Entry {
   diff?: EditDiff // edit 工具的结构化 diff（仅前端展示，不发给上游）
   search?: SearchResult // search 工具的结构化结果（仅前端展示，不发给上游）
   error?: boolean // 工具结果失败（前端标红；仅展示，不发给上游）
+  plain?: boolean // 工具结果按纯文本展示（read 的 tail 输出没有行号，不能走 markdown）
   summaryStatus?: 'failed' // 压缩摘要生成失败（截断/报错）：不是有效分割点
   ts?: number // 创建时间（毫秒），前端显示相对时间
 }
@@ -93,6 +94,7 @@ export interface ToolResult {
   images?: string[] // data URL：工具结果随上下文注入（read_image / MCP image content），服务端落盘后条目录 URL
   diff?: EditDiff // 结构化编辑 diff（仅前端展示）
   search?: SearchResult // search 工具的结构化结果（仅前端展示）
+  plain?: boolean // 前端按纯文本展示（read 的 tail 输出没有行号）
   isError?: boolean // 工具失败（前端标红；回给模型的文本不变）
   // pwsh 执行元数据：stdout/stderr 分开保留，text 是回给模型的合成文本（其它工具不填）
   exitCode?: number | null // null = 超时或启动失败，没有可信退出码

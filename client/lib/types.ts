@@ -14,6 +14,7 @@ export interface Entry {
   images?: string[]
   diff?: EditDiff // edit 工具结果的结构化 diff（仅展示）
   search?: SearchResult // search 工具的结构化结果（仅展示）
+  plain?: boolean // 按纯文本展示（read 的 tail 输出没有行号）
   error?: boolean // 工具结果失败（前端标红；不发给上游）
   live?: boolean // 工具结果正在实时输出（仅前端临时的展示态）
   summaryStatus?: 'failed' // 压缩摘要生成失败：不是有效分割点
