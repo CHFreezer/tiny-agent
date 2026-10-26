@@ -2,14 +2,14 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { resolveCwd } from './config.ts'
-import { clipMiddle } from './text.ts'
+import { clipMiddle, cutText, tailText } from './text.ts'
 import { fsErrorText } from './fsError.ts'
 import type { SearchFile, SearchLine, SearchResult, ToolResult } from './types.ts'
 
-// ===== search：ripgrep --json 流式搜索 =====
-// 目录/单文件均可；path 相对 cwd（默认 workspace），也支持绝对路径。
-// 与 VS Code 的文本搜索不同：文件名命中也会计入结果（单独标记，不参与行号匹配）。
-// 达到 max_results 或超时立即 kill rg；内容命中与文件名命中共享总预算。
+// ===== search：ripgrep 原生语义 =====
+// mode=content：搜索文件内容，返回文件/行号/命中行；mode=files：pattern 是 glob，只返回文件路径。
+// include/exclude 直接使用 rg glob：* 不跨目录，** 跨目录；不带 / 的模式按 basename 任意层级匹配。
+// 达到 max_results 或超时立即 kill rg。
 const DEFAULT_MAX_RESULTS = 100
 const MAX_RESULTS_LIMIT = 1000
 const DEFAULT_TIMEOUT_S = 30
@@ -17,26 +17,104 @@ const MAX_TIMEOUT_S = 600
 const MAX_LINE_CHARS = 400 // 单行显示上限（围绕首个命中裁剪）
 const MAX_TEXT_CHARS = 10000 // 交给模型的总字符上限
 
-// 与 VS Code 的默认行为对齐：搜索隐藏文件（--hidden），但排除这些目录/文件。
-// 路径 glob 默认锚定搜索根；任意层级请用 **/ 前缀。
+// 常见默认排除项（目录/文件名）；rg 会据此跳过整个目录
 const DEFAULT_EXCLUDES = [
-  '**/.git/**',
-  '**/.hg/**',
-  '**/.svn/**',
-  '**/CVS/**',
-  '**/.DS_Store',
-  '**/node_modules/**',
-  '**/bower_components/**',
+  '**/node_modules',
+  '**/bower_components',
   '**/*.code-search',
+  '**/.git',
+  '**/.svn',
+  '**/.hg',
+  '**/.jj',
+  '**/.DS_Store',
+  '**/Thumbs.db',
 ]
-// 照 VS Code ripgrepSearchUtils.ts 的 anchorGlob：不以 ** 或 / 开头的 glob 锚定到搜索根
-const anchorGlob = (glob: string) => (glob.startsWith('**') || glob.startsWith('/') ? glob : `/${glob}`)
-// include/exclude 共用的 glob 归一化：字符串或数组、去前导 !、正斜杠、去重、限长限量
+const MAX_FILE_SIZE = 16 * 1024 * 1024 * 1024 // VS Code 文本搜索的平台上限
+// VS Code 在非 Linux 平台按大小写不敏感匹配 glob 与 ignore 文件（searchView: ignoreGlobCase = !isLinux）
+const CASE_INSENSITIVE_GLOB_ARGS = process.platform === 'linux' ? [] : ['--glob-case-insensitive', '--ignore-file-case-insensitive']
+// 单文件精确匹配用的 glob 转义（文件名里的元字符按字面量处理）
+const GLOB_META = '*?[]{}!'
+const BACKSLASH = String.fromCharCode(92)
+const escapeGlobName = (name: string) =>
+  [...name].map((c) => (GLOB_META.includes(c) || c === BACKSLASH ? BACKSLASH + c : c)).join('')
+
+// ===== pattern 处理 =====
+// 与 VS Code unicodeEscapesToPCRE2 一致：\uXXXX / \u{XXXX} → \x{XXXX}（奇数个反斜杠才算转义）
+const unicodeEscapesToPCRE2 = (pattern: string): string => {
+  let out = ''
+  let i = 0
+  while (i < pattern.length) {
+    if (pattern[i] !== BACKSLASH) {
+      out += pattern[i++]
+      continue
+    }
+    let count = 0
+    while (i < pattern.length && pattern[i] === BACKSLASH) {
+      count++
+      i++
+    }
+    if (count % 2 === 1 && pattern[i] === 'u') {
+      const plain = pattern.slice(i + 1, i + 5)
+      if (plain.length === 4 && /^[a-z0-9]{4}$/i.test(plain)) {
+        out += BACKSLASH.repeat(count) + 'x{' + plain + '}'
+        i += 5
+        continue
+      }
+      if (pattern[i + 1] === '{' && /^[a-z0-9]{4}$/i.test(pattern.slice(i + 2, i + 6)) && pattern[i + 6] === '}') {
+        out += BACKSLASH.repeat(count) + 'x{' + pattern.slice(i + 2, i + 6) + '}'
+        i += 7
+        continue
+      }
+    }
+    out += BACKSLASH.repeat(count)
+  }
+  return out
+}
+
+interface BuiltPattern {
+  args: string[]
+  positional?: string
+}
+
+// 全词交给 rg --word-regexp：Unicode 词边界，literal/regex 都适用。
+// 不复刻 VS Code 的 \b 拼接（那套对空白/标点/CJK/交替都不够直观）。
+const buildPatternArgs = (pattern: string, syntax: 'literal' | 'regex', wholeWord: boolean): BuiltPattern => {
+  const isRegex = syntax === 'regex'
+  const wordArgs = wholeWord ? ['--word-regexp'] : []
+  if (isRegex) return { args: ['--engine', 'auto', ...wordArgs, '--regexp', unicodeEscapesToPCRE2(pattern)] }
+  return { args: ['--fixed-strings', ...wordArgs], positional: pattern }
+}
+
+// ===== 与 VS Code searchCompare 默认排序一致 =====
+const fileNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+const compareFileNames = (a: string, b: string): number => {
+  const r = fileNameCollator.compare(a, b)
+  if (r === 0 && a !== b && fileNameCollator.resolvedOptions().numeric) return a < b ? -1 : 1
+  return r
+}
+const comparePaths = (a: string, b: string): number => {
+  const ap = a.split('/')
+  const bp = b.split('/')
+  const lastA = ap.length - 1
+  const lastB = bp.length - 1
+  for (let i = 0; ; i++) {
+    const endA = lastA === i
+    const endB = lastB === i
+    if (endA && endB) return compareFileNames(ap[i], bp[i])
+    if (endA) return -1
+    if (endB) return 1
+    const ac = ap[i].toLowerCase()
+    const bc = bp[i].toLowerCase()
+    if (ac !== bc) return ac < bc ? -1 : 1
+  }
+}
+
+// include/exclude 共用的 glob 归一化（照搬 VS Code）：字符串或数组、去前导 !、正斜杠、去重、限长限量
 const normalizeGlobs = (v: unknown): string[] => [
   ...new Set(
     (Array.isArray(v) ? v : typeof v === 'string' ? [v] : [])
       .filter((x): x is string => typeof x === 'string')
-      .map((x) => x.trim().replace(/^!+/, '').replace(/\\/g, '/').slice(0, 260))
+      .map((x) => cutText(x.trim().replace(/^!+/, '').replace(/\\/g, '/'), 260))
       .filter(Boolean)
       .slice(0, 50),
   ),
@@ -90,12 +168,13 @@ const summarizeRgError = (raw: string): string => {
   return raw
 }
 
-// 按行切分流式输出（块边界可能切在行中间）
+// 按行切分流式输出（块边界可能切在行中间，也可能切在多字节字符中间）
 function lineSplitter(onLine: (line: string) => void) {
   let buf = ''
+  const decoder = new TextDecoder('utf-8')
   return {
     push(chunk: Buffer) {
-      buf += chunk.toString('utf8')
+      buf += decoder.decode(chunk, { stream: true })
       let idx: number
       while ((idx = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, idx).replace(/\r$/, '')
@@ -104,6 +183,7 @@ function lineSplitter(onLine: (line: string) => void) {
       }
     },
     end() {
+      buf += decoder.decode()
       if (buf.trim()) onLine(buf.trim())
       buf = ''
     },
@@ -137,11 +217,14 @@ const charIndex = (map: { bytes: number[]; chars: number[] }, byte: number) => {
 }
 
 // 超长行围绕首个命中裁剪，保留前后文，并把命中区间平移
+// 边界不能落在 UTF-16 代理对中间，否则会生成 lone surrogate（上游 JSON 解析会 400）
 const clampLine = (text: string, ranges: Array<[number, number]>): { text: string; ranges: Array<[number, number]> } => {
   if (text.length <= MAX_LINE_CHARS) return { text, ranges }
   const first = ranges[0]?.[0] ?? 0
-  const start = Math.max(0, Math.min(first - 100, text.length - MAX_LINE_CHARS))
-  const end = start + MAX_LINE_CHARS
+  let start = Math.max(0, Math.min(first - 100, text.length - MAX_LINE_CHARS))
+  if (start > 0 && text.charCodeAt(start) >= 0xdc00 && text.charCodeAt(start) <= 0xdfff) start--
+  let end = start + MAX_LINE_CHARS
+  if (end < text.length && text.charCodeAt(end - 1) >= 0xd800 && text.charCodeAt(end - 1) <= 0xdbff) end++
   const prefix = start > 0 ? '…' : ''
   const suffix = end < text.length ? '…' : ''
   const shifted = ranges
@@ -149,6 +232,9 @@ const clampLine = (text: string, ranges: Array<[number, number]>): { text: strin
     .map(([a, b]) => [Math.max(a, start) - start + prefix.length, Math.min(b, end) - start + prefix.length] as [number, number])
   return { text: prefix + text.slice(start, end) + suffix, ranges: shifted }
 }
+
+const firstCodePointLength = (text: string) =>
+  text.length >= 2 && text.charCodeAt(0) >= 0xd800 && text.charCodeAt(0) <= 0xdbff ? 2 : Math.min(1, text.length)
 
 // 相对 cwd 的显示路径（目录外则用绝对路径），统一正斜杠
 const displayPath = (cwd: string, p: string) => {
@@ -167,128 +253,6 @@ const bytesOrText = (v: unknown): string => {
   return ''
 }
 
-// 文件名匹配用 JS 正则（rg 的 Rust 正则与 JS 有差异；编译失败就跳过文件名命中）
-// regex 模式支持 \Q...\E（转成 JS 转义文本）；literal 模式直接转义整段文本。
-const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-const unquote = (s: string) => s.replace(/\\Q([\s\S]*?)\\E/g, (_, lit: string) => escapeRegExp(lit))
-const nameRegex = (pattern: string, mode: 'literal' | 'regex', ignoreCase: boolean): RegExp | null => {
-  let src = pattern
-  let flags = ignoreCase ? 'giu' : 'gu'
-  if (mode === 'regex' && src.startsWith('(?i)')) {
-    src = src.slice(4)
-    flags = 'giu'
-  }
-  src = mode === 'literal' ? escapeRegExp(src) : unquote(src)
-  for (const f of [flags, flags.replace('u', ''), flags.replace('gu', 'g')]) {
-    try {
-      return new RegExp(src, f)
-    } catch {
-      // 尝试下一个 flags
-    }
-  }
-  return null
-}
-interface NameOpts {
-  mode: 'literal' | 'regex'
-  ignoreCase: boolean
-  wholeWord: boolean
-}
-const isWordChar = (ch: string | undefined) => !!ch && /[A-Za-z0-9_]/.test(ch)
-// 在 basename 上匹配，但返回整条显示路径中的区间（前端高亮用）
-const nameRangesOf = (display: string, pattern: string, opts: NameOpts): Array<[number, number]> | undefined => {
-  const baseStart = display.lastIndexOf('/') + 1
-  const base = display.slice(baseStart)
-  const re = nameRegex(pattern, opts.mode, opts.ignoreCase)
-  if (!re) return undefined
-  const ranges: Array<[number, number]> = []
-  for (const m of base.matchAll(re)) {
-    if (!m[0] || m.index === undefined) continue
-    const end = m.index + m[0].length
-    if (opts.wholeWord && (isWordChar(base[m.index - 1]) || isWordChar(base[end]))) continue
-    ranges.push([baseStart + m.index, baseStart + end])
-  }
-  return ranges.length ? ranges : undefined
-}
-
-interface NameScan {
-  hits: Map<string, SearchFile>
-  truncated: boolean
-  timedOut: boolean
-  error?: string
-}
-
-// rg --files 流式枚举文件名；路径是文件时直接检查 basename。
-// 目录搜索时 rg 的 cwd 设为搜索根（path），这样 include/exclude glob 的锚定基准与文档一致：
-// 不以 ** 或 / 开头的模式锚定搜索根（rg 的 glob 默认相对 cwd 匹配）。
-function scanNames(abs: string, isDir: boolean, toolCwd: string, pattern: string, nameOpts: NameOpts, maxHits: number, timeoutMs: number, rg: string, includes: string[], excludes: string[]): Promise<NameScan> {
-  const hits = new Map<string, SearchFile>()
-  if (!isDir) {
-    const display = displayPath(toolCwd, abs)
-    const ranges = nameRangesOf(display, pattern, nameOpts)
-    if (ranges) hits.set(display, { path: display, nameMatch: true, nameRanges: ranges, matches: [] })
-    return Promise.resolve({ hits, truncated: false, timedOut: false })
-  }
-  return new Promise((resolve) => {
-    let settled = false
-    let truncated = false
-    let timedOut = false
-    let stopped = false
-    let stderr = ''
-    // 显式指定单个文件时不套用 ignore/include/exclude/hidden（用户就是要搜这个文件）
-    const args = isDir
-      ? [
-          '--files',
-          '--hidden',
-          '--no-config',
-          '--no-require-git',
-          ...includes.flatMap((g) => ['--glob', g]),
-          ...excludes.flatMap((g) => ['--glob', `!${g}`]),
-          '--',
-          '.',
-        ]
-      : ['--files', '--no-config', '--', abs]
-    const child = spawn(rg, args, {
-      cwd: isDir ? abs : toolCwd,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    const finish = () => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      resolve({ hits, truncated, timedOut, ...(stderr.trim() ? { error: stderr.trim() } : {}) })
-    }
-    const timer = setTimeout(() => {
-      timedOut = true
-      child.kill()
-    }, timeoutMs)
-    const split = lineSplitter((line) => {
-      if (stopped || hits.size >= maxHits) return
-      const display = displayPath(toolCwd, path.resolve(abs, line))
-      const ranges = nameRangesOf(display, pattern, nameOpts)
-      if (!ranges) return
-      hits.set(display, { path: display, nameMatch: true, nameRanges: ranges, matches: [] })
-      if (hits.size >= maxHits) {
-        stopped = true
-        truncated = true
-        child.kill()
-      }
-    })
-    child.stdout.on('data', (chunk: Buffer) => split.push(chunk))
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderr = (stderr + chunk.toString('utf8')).slice(-4000)
-    })
-    child.on('error', (err) => {
-      stderr = spawnErrorText(err)
-      finish()
-    })
-    child.on('close', () => {
-      split.end()
-      finish()
-    })
-  })
-}
-
 interface ContentScan {
   files: Map<string, SearchFile>
   total: number
@@ -298,9 +262,30 @@ interface ContentScan {
   error?: string
 }
 
+// 行号排序 + 去重；只有上下文的文件（例如重搜时命中被跳过）不保留
+const normalizeMatches = (files: Map<string, SearchFile>) => {
+  for (const [p, file] of files) {
+    file.matches.sort((a, b) => a.line - b.line || (a.kind === 'context' ? 1 : 0) - (b.kind === 'context' ? 1 : 0))
+    const dedup: SearchLine[] = []
+    for (const m of file.matches) {
+      const prev = dedup[dedup.length - 1]
+      if (prev && prev.line === m.line) {
+        if (prev.kind === 'context' && m.kind !== 'context') dedup[dedup.length - 1] = m
+        continue
+      }
+      dedup.push(m)
+    }
+    file.matches = dedup
+    if (!file.matches.some((m) => m.kind === 'match')) files.delete(p)
+  }
+}
+
 // rg --json 流式内容搜索；达到 remaining 或超时 kill。
-// 目录搜索时 rg 的 cwd 设为搜索根（path），让 include/exclude glob 锚定搜索根。
-function scanContent(pattern: string, abs: string, toolCwd: string, remaining: number, timeoutMs: number, rg: string, isDir: boolean, includes: string[], excludes: string[], opts: { mode: 'literal' | 'regex'; ignoreCase: boolean; wholeWord: boolean; context: number; encoding?: string }): Promise<ContentScan> {
+// 与 VS Code 一致：rg 的 cwd 始终设为目录搜索根（路径传 "."），二进制文件由 rg 的目录扫描规则跳过。
+// 单文件模式把根设为文件所在目录，并用锚定到根的字面量 glob 限定到该文件。
+function scanContent(pattern: string, abs: string, toolCwd: string, remaining: number, timeoutMs: number, rg: string, includes: string[], excludes: string[], opts: { syntax: 'literal' | 'regex'; ignoreCase: boolean; wholeWord: boolean; context: number; encoding?: string; exactFile?: string; exactDisplay?: string }): Promise<ContentScan> {
+  // whole word 交给 rg --word-regexp（Unicode 词边界）；regex 里的 \uXXXX 先转成 PCRE2 的 \x{...}
+  const patternArgs = buildPatternArgs(pattern, opts.syntax, opts.wholeWord)
   return new Promise((resolve) => {
     const files = new Map<string, SearchFile>()
     let total = 0
@@ -310,27 +295,53 @@ function scanContent(pattern: string, abs: string, toolCwd: string, remaining: n
     let stopped = false
     let nonUtf8 = false
     let stderr = ''
+    const stderrDecoder = new TextDecoder('utf-8')
     let exited: number | null = null
-    // 显式指定单个文件时不套用 ignore/include/exclude/hidden；模式/大小写/编码仍然生效
+    const displayOf = (p: string) => displayPath(toolCwd, path.resolve(abs, p))
+    // 显式指定单个文件时不套用用户 include/exclude；模式/大小写/编码仍然生效
     const common = [
       '--json',
       '--crlf',
       '--no-config',
       opts.ignoreCase ? '--ignore-case' : '--case-sensitive',
-      ...(opts.wholeWord ? ['--word-regexp'] : []),
-      ...(opts.mode === 'regex' ? ['--engine', 'auto'] : ['--fixed-strings']),
       ...(opts.context > 0 ? ['--before-context', String(opts.context), '--after-context', String(opts.context)] : []),
       ...(opts.encoding ? ['--encoding', opts.encoding] : []),
+      ...patternArgs.args,
     ]
     const globArgs = [
       ...includes.flatMap((g) => ['--glob', g]),
       ...excludes.flatMap((g) => ['--glob', `!${g}`]),
     ]
-    const args = isDir
-      ? [...common, '--hidden', '--no-require-git', ...globArgs, '--', pattern, '.']
-      : [...common, '--', pattern, abs]
+    const tail = ['--', ...(patternArgs.positional !== undefined ? [patternArgs.positional] : []), '.']
+    const args = opts.exactFile
+      ? [
+          ...common,
+          '--hidden',
+          '--no-ignore',
+          '--no-require-git',
+          '--follow',
+          '--max-depth',
+          '1',
+          // 大小写不敏感的文件系统上，用户输入的大小写可能与磁盘不一致；Linux 保持精确匹配
+          ...CASE_INSENSITIVE_GLOB_ARGS,
+          '--glob',
+          opts.exactFile,
+          '--max-filesize',
+          String(MAX_FILE_SIZE),
+          ...tail,
+        ]
+      : [
+          ...common,
+          '--hidden',
+          '--no-require-git',
+          '--max-filesize',
+          String(MAX_FILE_SIZE),
+          ...CASE_INSENSITIVE_GLOB_ARGS,
+          ...globArgs,
+          ...tail,
+        ]
     const child = spawn(rg, args, {
-      cwd: isDir ? abs : toolCwd,
+      cwd: abs,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -338,28 +349,16 @@ function scanContent(pattern: string, abs: string, toolCwd: string, remaining: n
       if (settled) return
       settled = true
       clearTimeout(timer)
-      // 行号排序 + 去重（相邻命中的上下文可能重叠；同一行优先保留命中行）
-      for (const file of files.values()) {
-        file.matches.sort((a, b) => a.line - b.line || (a.kind === 'context' ? 1 : 0) - (b.kind === 'context' ? 1 : 0))
-        const dedup: SearchLine[] = []
-        for (const m of file.matches) {
-          const prev = dedup[dedup.length - 1]
-          if (prev && prev.line === m.line) {
-            if (prev.kind === 'context' && m.kind !== 'context') dedup[dedup.length - 1] = m
-            continue
-          }
-          dedup.push(m)
-        }
-        file.matches = dedup
-      }
+      normalizeMatches(files)
       const err = stderr.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').trim()
+      const failed = exited === 2 || (err && total === 0)
       resolve({
         files,
         total,
         truncated,
         timedOut,
         nonUtf8,
-        ...(exited === 2 || (err && total === 0) ? { error: err || 'rg 执行失败' } : {}),
+        ...(failed ? { error: err || 'rg 执行失败' } : {}),
       })
     }
     const timer = setTimeout(() => {
@@ -384,7 +383,8 @@ function scanContent(pattern: string, abs: string, toolCwd: string, remaining: n
       const lineText = bytesOrText(lineObj)
       if (!p || !lineText) return
       const text = lineText.replace(/\r?\n$/, '')
-      const display = displayPath(toolCwd, isDir ? path.resolve(abs, p) : path.isAbsolute(p) ? p : path.resolve(toolCwd, p))
+      // 单文件模式下 rg 报的是磁盘上的实际大小写，统一用用户给出的路径，避免与同名命中分裂成两条
+      const display = opts.exactDisplay ?? displayOf(p)
       const file = files.get(display) ?? { path: display, matches: [] as SearchLine[] }
       if (type === 'context') {
         const clamped = clampLine(text, [])
@@ -392,11 +392,24 @@ function scanContent(pattern: string, abs: string, toolCwd: string, remaining: n
         files.set(display, file)
         return
       }
+      const available = remaining - total
+      if (available <= 0) {
+        truncated = true
+        stopped = true
+        child.kill()
+        return
+      }
       const map = offsetMap(text)
       // rg 对某些正则不会给出 submatches：退化为整行首个字符，保证有高亮与计数
-      const subs = Array.isArray(data.submatches) && data.submatches.length
+      const matchedSubs = Array.isArray(data.submatches) && data.submatches.length
         ? data.submatches
-        : [{ start: 0, end: 1, match: { text: text.slice(0, 1) } }]
+        : [{ start: 0, end: firstCodePointLength(text), match: { text: text.slice(0, firstCodePointLength(text)) } }]
+      // 精确裁剪到最后一行，保证总数不超过 max_results
+      const subs = matchedSubs.length > available ? matchedSubs.slice(0, available) : matchedSubs
+      if (subs.length < matchedSubs.length) {
+        truncated = true
+        stopped = true
+      }
       let searchFrom = 0
       const ranges = subs
         .map((sm) => {
@@ -417,7 +430,7 @@ function scanContent(pattern: string, abs: string, toolCwd: string, remaining: n
           return [start, end] as [number, number]
         })
         .filter(([a, b]) => b > a)
-      if (!ranges.length) ranges.push([0, Math.min(1, text.length)])
+      if (!ranges.length) ranges.push([0, firstCodePointLength(text)])
       const clamped = clampLine(text, ranges)
       file.matches.push({ line: Number(data.line_number) || 0, text: clamped.text, ranges: clamped.ranges, count: Math.max(1, subs.length), kind: 'match' })
       files.set(display, file)
@@ -431,7 +444,7 @@ function scanContent(pattern: string, abs: string, toolCwd: string, remaining: n
     })
     child.stdout.on('data', (chunk: Buffer) => split.push(chunk))
     child.stderr.on('data', (chunk: Buffer) => {
-      stderr = (stderr + chunk.toString('utf8')).slice(-4000)
+      stderr = tailText(stderr + stderrDecoder.decode(chunk, { stream: true }), 4000)
     })
     child.on('error', (err) => {
       stderr = spawnErrorText(err)
@@ -439,6 +452,90 @@ function scanContent(pattern: string, abs: string, toolCwd: string, remaining: n
     })
     child.on('close', (code) => {
       exited = code
+      stderr = tailText(stderr + stderrDecoder.decode(), 4000)
+      split.end()
+      finish()
+    })
+  })
+}
+
+interface FileScan {
+  paths: string[]
+  truncated: boolean
+  timedOut: boolean
+  error?: string
+}
+
+// rg --files：pattern 是 glob；excludes 为需要加 ! 的 glob；不读取内容
+function scanFiles(
+  root: string,
+  toolCwd: string,
+  patternGlob: string,
+  maxResults: number,
+  timeoutMs: number,
+  rg: string,
+  excludes: string[],
+): Promise<FileScan> {
+  return new Promise((resolve) => {
+    const paths: string[] = []
+    let settled = false
+    let truncated = false
+    let timedOut = false
+    let stopped = false
+    let stderr = ''
+    const stderrDecoder = new TextDecoder('utf-8')
+    let exited: number | null = null
+    const args = [
+      '--files',
+      '--hidden',
+      '--no-config',
+      '--no-require-git',
+      ...CASE_INSENSITIVE_GLOB_ARGS,
+      '--glob',
+      patternGlob,
+      ...excludes.flatMap((g) => ['--glob', `!${g}`]),
+      '--',
+      '.',
+    ]
+    const child = spawn(rg, args, {
+      cwd: root,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    const finish = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      const err = stderr.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').trim()
+      const failed = exited === 2 || (err && paths.length === 0)
+      paths.sort(comparePaths)
+      resolve({ paths, truncated, timedOut, ...(failed ? { error: err || 'rg 执行失败' } : {}) })
+    }
+    const timer = setTimeout(() => {
+      timedOut = true
+      child.kill()
+    }, timeoutMs)
+    const split = lineSplitter((line) => {
+      if (stopped) return
+      if (paths.length >= maxResults) {
+        truncated = true
+        stopped = true
+        child.kill()
+        return
+      }
+      paths.push(displayPath(toolCwd, path.resolve(root, line)))
+    })
+    child.stdout.on('data', (chunk: Buffer) => split.push(chunk))
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr = tailText(stderr + stderrDecoder.decode(chunk, { stream: true }), 4000)
+    })
+    child.on('error', (err) => {
+      stderr = spawnErrorText(err)
+      finish()
+    })
+    child.on('close', (code) => {
+      exited = code
+      stderr = tailText(stderr + stderrDecoder.decode(), 4000)
       split.end()
       finish()
     })
@@ -448,6 +545,7 @@ function scanContent(pattern: string, abs: string, toolCwd: string, remaining: n
 export async function searchTool(args: {
   pattern?: unknown
   mode?: unknown
+  syntax?: unknown
   flags?: unknown
   path?: unknown
   cwd?: unknown
@@ -459,101 +557,123 @@ export async function searchTool(args: {
   encoding?: unknown
 }): Promise<ToolResult> {
   const startedAt = Date.now()
+  const NL = String.fromCharCode(10)
   const pattern = String(args.pattern ?? '')
   if (!pattern) return fail('搜索失败: 缺少 pattern')
+  const mode: 'content' | 'files' = args.mode === 'files' ? 'files' : 'content'
+  if (mode === 'files') {
+    if (args.syntax !== undefined) return fail('搜索失败: files 模式不支持 syntax（pattern 是 glob）')
+    if (args.flags !== undefined) return fail('搜索失败: files 模式不支持 flags（pattern 是 glob）')
+    if (args.context !== undefined) return fail('搜索失败: files 模式不支持 context（只返回文件路径）')
+    if (args.encoding !== undefined) return fail('搜索失败: files 模式不支持 encoding（不读取文件内容）')
+    if (args.include !== undefined) return fail('搜索失败: files 模式不支持 include（pattern 已经是文件 glob；可用 exclude）')
+    if (pattern.trimStart().startsWith('!')) return fail('搜索失败: files 模式的 pattern 必须是正向 glob；排除请用 exclude')
+  }
   const cwd = resolveCwd(args.cwd)
   if ('error' in cwd) return fail(`搜索失败: ${cwd.error}`)
-  // include/exclude：用户 glob；应用时 include 直接传，exclude 与默认排除合并，并按 anchorGlob 锚定。
-  const userIncludes = normalizeGlobs(args.include)
-  const includeGlobs = userIncludes.map(anchorGlob)
-  const userExcludes = normalizeGlobs(args.exclude)
-  const excludeGlobs = [...new Set([...DEFAULT_EXCLUDES, ...userExcludes.map(anchorGlob)])]
   const target = String(args.path ?? '.').trim() || '.'
   const abs = path.resolve(cwd.dir, target)
   let isDir = false
+  let isFile = false
   try {
     const st = fs.statSync(abs)
     isDir = st.isDirectory()
-    if (!isDir && !st.isFile()) return fail(`搜索失败: 不是文件或目录: ${abs}`)
+    isFile = st.isFile()
+    if (!isDir && !isFile) return fail(`搜索失败: 不是文件或目录: ${abs}`)
   } catch (err) {
     return fail(`搜索失败: ${fsErrorText(err, abs)}`)
   }
+  if (mode === 'files' && !isDir) return fail(`搜索失败: files 模式的 path 必须是目录: ${abs}`)
   const toInt = (v: unknown, def: number) => {
     const n = Math.floor(Number(v))
     return Number.isFinite(n) && n > 0 ? n : def
   }
   const maxResults = Math.min(toInt(args.max_results, DEFAULT_MAX_RESULTS), MAX_RESULTS_LIMIT)
   const timeoutS = Math.min(toInt(args.timeout, DEFAULT_TIMEOUT_S), MAX_TIMEOUT_S)
-  const deadline = Date.now() + timeoutS * 1000
-  const remainingMs = () => Math.max(1, deadline - Date.now())
-  const encodingArg = typeof args.encoding === 'string' ? args.encoding.trim() : ''
-  if (encodingArg && !/^[A-Za-z0-9._-]+$/.test(encodingArg)) return fail(`搜索失败: 不支持的 encoding: ${encodingArg}`)
-  const encoding = encodingArg ? encodingArg.slice(0, 32) : undefined
-  const mode: 'literal' | 'regex' = args.mode === 'regex' ? 'regex' : 'literal'
-  const flagStr = typeof args.flags === 'string' ? args.flags.toLowerCase() : Array.isArray(args.flags) ? args.flags.join('').toLowerCase() : ''
+  const timeoutMs = timeoutS * 1000
+  const userExcludes = normalizeGlobs(args.exclude)
+  const excludeGlobs = [...new Set([...DEFAULT_EXCLUDES, ...userExcludes])]
+  const root = displayPath(cwd.dir, abs)
+  const rg = await resolveRg()
+
+  if (mode === 'files') {
+    const scan = await scanFiles(abs, cwd.dir, pattern, maxResults, timeoutMs, rg, excludeGlobs)
+    if (scan.error) return { text: clipMiddle(`搜索失败: ${summarizeRgError(scan.error)}`, MAX_TEXT_CHARS), isError: true }
+    const files: SearchFile[] = scan.paths.map((p) => ({ path: p, matches: [] }))
+    const result: SearchResult = {
+      mode: 'files',
+      pattern,
+      root,
+      files,
+      totalMatches: 0,
+      nameHits: files.length,
+      truncated: scan.truncated,
+      limit: maxResults,
+      ...(userExcludes.length ? { exclude: userExcludes } : {}),
+      ...(scan.timedOut ? { timedOut: true } : {}),
+    }
+    const filters = userExcludes.length ? `（排除：${userExcludes.join('、')}）` : ''
+    const lines: string[] = [`[搜索文件] ${pattern} 于 ${root}${filters}`]
+    if (!files.length) lines.push('未找到匹配')
+    else for (const f of files) lines.push(f.path)
+    lines.push(`[${files.length} 个文件${scan.timedOut ? '，搜索超时' : ''}]`)
+    if (scan.truncated) lines.push(`[已截断] 已显示 ${files.length} 个文件（上限 ${maxResults}）`)
+    return { text: clipMiddle(lines.join(NL), MAX_TEXT_CHARS), search: result, durationMs: Date.now() - startedAt }
+  }
+
+  const syntax: 'literal' | 'regex' = args.syntax === 'regex' ? 'regex' : 'literal'
+  const flagStr = typeof args.flags === 'string' ? args.flags.toLowerCase() : ''
   const badFlags = [...new Set([...flagStr].filter((c) => c !== 'i' && c !== 'w'))]
   if (badFlags.length) return fail(`搜索失败: 不支持的 flags: ${badFlags.join('')}（仅支持 i、w）`)
   const ignoreCase = flagStr.includes('i')
   const wholeWord = flagStr.includes('w')
   const ctxRaw = Math.floor(Number(args.context))
   const contextLines = Number.isFinite(ctxRaw) && ctxRaw > 0 ? Math.min(ctxRaw, 20) : 0
-  const nameOpts: NameOpts = { mode, ignoreCase, wholeWord }
-  const rg = await resolveRg()
-
-  // 文件名命中最多占 1/4 预算，避免文件名匹配把内容结果挤掉
-  const nameBudget = Math.max(1, Math.floor(maxResults / 4))
-  const names = await scanNames(abs, isDir, cwd.dir, pattern, nameOpts, nameBudget, remainingMs(), rg, includeGlobs, excludeGlobs)
-  const remaining = maxResults - names.hits.size
-  const content: ContentScan = remaining > 0
-    ? await scanContent(pattern, abs, cwd.dir, remaining, remainingMs(), rg, isDir, includeGlobs, excludeGlobs, { mode, ignoreCase, wholeWord, context: contextLines, encoding })
-    : { files: new Map<string, SearchFile>(), total: 0, truncated: true, timedOut: false, nonUtf8: false }
-
-  // 内容命中与文件名命中合并：同一文件只出现一次
-  const files = [...content.files.values()]
-  for (const [p, hit] of names.hits) {
-    const existing = content.files.get(p)
-    if (existing) {
-      existing.nameMatch = true
-      existing.nameRanges = hit.nameRanges
-    } else {
-      files.push(hit)
-    }
-  }
-  files.sort((a, b) => a.path.localeCompare(b.path))
-
-  const root = displayPath(cwd.dir, abs)
+  const encodingArg = typeof args.encoding === 'string' ? args.encoding.trim() : ''
+  if (encodingArg && !/^[A-Za-z0-9._-]+$/.test(encodingArg)) return fail(`搜索失败: 不支持的 encoding: ${encodingArg}`)
+  const encoding = encodingArg ? encodingArg.slice(0, 32) : undefined
+  const userIncludes = normalizeGlobs(args.include)
+  const contentRoot = isDir ? abs : path.dirname(abs)
+  const exactFile = isDir ? undefined : `/${escapeGlobName(path.basename(abs))}`
+  const exactDisplay = isDir ? undefined : displayPath(cwd.dir, abs)
+  const content = await scanContent(pattern, contentRoot, cwd.dir, maxResults, timeoutMs, rg, userIncludes, excludeGlobs, {
+    syntax,
+    ignoreCase,
+    wholeWord,
+    context: contextLines,
+    encoding,
+    exactFile,
+    exactDisplay,
+  })
+  if (content.error) return { text: clipMiddle(`搜索失败: ${summarizeRgError(content.error)}`, MAX_TEXT_CHARS), isError: true }
+  const files = [...content.files.values()].sort((a, b) => comparePaths(a.path, b.path))
   const result: SearchResult = {
+    mode: 'content',
+    syntax,
     pattern,
     root,
     files,
     totalMatches: content.total,
-    nameHits: names.hits.size,
-    truncated: content.truncated || names.truncated || remaining <= 0,
+    nameHits: 0,
+    truncated: content.truncated,
     limit: maxResults,
     ...(content.nonUtf8 ? { nonUtf8: true } : {}),
     ...(contextLines ? { context: contextLines } : {}),
     ...(userIncludes.length ? { include: userIncludes } : {}),
     ...(userExcludes.length ? { exclude: userExcludes } : {}),
-    ...(content.timedOut || names.timedOut ? { timedOut: true } : {}),
+    ...(content.timedOut ? { timedOut: true } : {}),
   }
-
-  const err = content.error ?? (content.total === 0 ? names.error : undefined)
-  if (err) return { text: clipMiddle(`搜索失败: ${summarizeRgError(err)}`, MAX_TEXT_CHARS), isError: true }
-
-  const filters = [
+  const headFilters = [
     userIncludes.length ? `仅：${userIncludes.join('、')}` : '',
     userExcludes.length ? `排除：${userExcludes.join('、')}` : '',
   ].filter(Boolean)
-  const header = `[搜索] ${pattern} 于 ${root}${filters.length ? `（${filters.join('；')}）` : ''}`
+  const header = `[搜索] ${pattern} 于 ${root}${headFilters.length ? `（${headFilters.join('；')}）` : ''}`
   const lines: string[] = [header]
-  if (!files.length) {
-    lines.push('未找到匹配')
-  } else {
+  if (!files.length) lines.push('未找到匹配')
+  else {
     for (const file of files) {
-      const nameTag = file.nameMatch ? '  [文件名命中]' : ''
       const fileCount = file.matches.reduce((n, m) => n + (m.kind === 'context' ? 0 : (m.count ?? m.ranges.length)), 0)
-      const count = fileCount ? `  (${fileCount})` : ''
-      lines.push(`${file.path}${nameTag}${count}`)
+      lines.push(`${file.path}${fileCount ? `  (${fileCount})` : ''}`)
       let prevLine = -1
       for (const m of file.matches) {
         if (prevLine >= 0 && m.line > prevLine + 1) lines.push('      ...')
@@ -563,17 +683,8 @@ export async function searchTool(args: {
       }
     }
   }
-  const totalResults = content.total + names.hits.size
-  const breakdown = names.hits.size ? `（${content.total} 处内容 + ${names.hits.size} 个文件名命中）` : ''
   const nonUtf8Hint = content.nonUtf8 ? '，含非 UTF-8 内容' : ''
-  lines.push(
-    `[${files.length} 个文件，${totalResults} 个结果${breakdown}${result.timedOut ? '，搜索超时' : ''}${nonUtf8Hint}]`,
-  )
-  if (result.truncated) lines.push(`[已截断] 已显示 ${totalResults} 个结果（上限 ${maxResults}）`)
-  // 超时不是错误：结果可能只是不完整，正文里已经有「搜索超时」标记
-  return {
-    text: clipMiddle(lines.join('\n'), MAX_TEXT_CHARS),
-    search: result,
-    durationMs: Date.now() - startedAt,
-  }
+  lines.push(`[${files.length} 个文件，${content.total} 个结果${content.timedOut ? '，搜索超时' : ''}${nonUtf8Hint}]`)
+  if (content.truncated) lines.push(`[已截断] 已显示 ${content.total} 个结果（上限 ${maxResults}）`)
+  return { text: clipMiddle(lines.join(NL), MAX_TEXT_CHARS), search: result, durationMs: Date.now() - startedAt }
 }

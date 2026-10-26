@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { DATA_DIR } from './config.ts'
+import { cutText } from './text.ts'
 
 // ===== 记忆：持久文本列表，每次生成注入 developer 角色 =====
 const MEMORIES_FILE = path.join(DATA_DIR, 'memories.json')
@@ -19,7 +20,7 @@ export function saveMemories(memories: unknown[]): string[] {
     .map((m) => m.trim())
     .filter((m) => m.length > 0)
     .slice(0, 50)
-    .map((m) => m.slice(0, 2000))
+    .map((m) => cutText(m, 2000))
   fs.mkdirSync(DATA_DIR, { recursive: true })
   fs.writeFileSync(MEMORIES_FILE, JSON.stringify(clean))
   return clean

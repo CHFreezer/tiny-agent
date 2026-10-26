@@ -51,6 +51,8 @@ export interface SearchFile {
   matches: SearchLine[]
 }
 export interface SearchResult {
+  mode?: 'content' | 'files' // 旧数据缺省按 content
+  syntax?: 'literal' | 'regex'
   pattern: string
   root: string
   files: SearchFile[]

@@ -17,6 +17,7 @@ import {
   withLock,
 } from './sessions.ts'
 import { getOpenAI, normalizeMessage, toApiMessages, upstreamRequest } from './upstream.ts'
+import { cutText } from './text.ts'
 import { mcpStatus, syncMcp } from './mcp.ts'
 import { compactContext } from './compact.ts'
 import { currentTools } from './tools.ts'
@@ -147,19 +148,31 @@ export function registerRoutes(app: express.Express): void {
   })
 
   // 发送消息：服务器追加 user 条目 → 启动生成（流式）
-  app.post('/api/sessions/:id/messages', (req, res) => {
+  app.post('/api/sessions/:id/messages', async (req, res) => {
     const s = guardSession(req, res)
     if (!s) return
     const { content, images } = req.body as { content?: string; images?: string[] }
     if (typeof content !== 'string' && !Array.isArray(images)) {
       return res.status(400).json({ error: 'content or images required' })
     }
+    const sources = Array.isArray(images) ? images : []
+    if (sources.some((src) => typeof src !== 'string' || !src)) {
+      return res.status(400).json({ error: 'images 必须是非空字符串数组' })
+    }
     void withLock(s.id, async () => {
+      // 上传图片先严格解码并转 PNG/GIF 落盘；坏图直接 400，避免发到上游才报错
+      let storedImages: string[] | undefined
+      try {
+        if (sources.length) storedImages = await Promise.all(sources.map((src) => storeImage(s.id, src)))
+      } catch (err) {
+        res.status(400).json({ error: errMsg(err) })
+        return
+      }
       const user: Entry = { id: randomUUID(), role: 'user', content: content ?? '', ts: Date.now() }
-      // 上传的图片落盘 → 条目里只存 URL（后续 stream/JSON 都不再携带 base64）
-      if (Array.isArray(images) && images.length) user.images = images.map((src) => storeImage(s.id, src))
+      // 条目里只存 URL（后续 stream/JSON 都不再携带 base64）
+      if (storedImages?.length) user.images = storedImages
       s.history.push(user)
-      if (s.title === '新会话' && content) s.title = content.slice(0, 20)
+      if (s.title === '新会话' && content) s.title = cutText(content, 20)
       saveSession(s)
       const g = beginGen(s, res) // 先广播 gen:true（含新标题），其他设备随即附加本会话流
       const w = makeW(g)
@@ -288,7 +301,8 @@ export function registerRoutes(app: express.Express): void {
     if (!cfg.baseUrl || !cfg.model) return res.status(400).json({ error: '未配置服务器地址/模型' })
     try {
       const memories = readMemories()
-      const messages = (memories.length ? [{ role: 'developer', content: memories.join('\n') }, ...toApiMessages(s.history)] : toApiMessages(s.history)).map(normalizeMessage)
+      const apiMessages = await toApiMessages(s.history)
+      const messages = (memories.length ? [{ role: 'developer', content: memories.join('\n') }, ...apiMessages] : apiMessages).map(normalizeMessage)
       const tools = currentTools()
       const stream = await getOpenAI(cfg.baseUrl, cfg.apiKey).chat.completions.create({
         model: cfg.model,

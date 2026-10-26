@@ -106,8 +106,9 @@ export const WRITE_ARGS: Record<string, ArgSpec> = {
 }
 
 export const SEARCH_ARGS: Record<string, ArgSpec> = {
-  pattern: { type: 'string', required: true, allowEmpty: false },
-  mode: { type: 'string', enum: ['literal', 'regex'] },
+  pattern: { type: 'string', required: true },
+  mode: { type: 'string', enum: ['content', 'files'] },
+  syntax: { type: 'string', enum: ['literal', 'regex'] },
   flags: { type: 'string' },
   path: { type: 'string', allowEmpty: false },
   cwd: { type: 'string' },

@@ -74,12 +74,13 @@ export async function compactContext(session: Session, w: (o: unknown) => void, 
     // 输入 = 当前有效上下文（排除本气泡，沿用已有分割点）+ 摘要指令
     // 与主请求共用 buildChatRequest 构建，前缀/tools 完全一致避免 cache miss
     guard.arm()
+    const req = await buildChatRequest({
+      history: session.history.filter((e) => e.id !== entry.id),
+      extra: [{ role: 'user', content: SUMMARY_PROMPT }],
+      createdAt: session.createdAt,
+    })
     const stream = await getOpenAI(s.baseUrl, s.apiKey).chat.completions.create(
-      buildChatRequest({
-        history: session.history.filter((e) => e.id !== entry.id),
-        extra: [{ role: 'user', content: SUMMARY_PROMPT }],
-        createdAt: session.createdAt,
-      }),
+      req,
       upstreamRequest(guard.signal),
     )
     guard.arm()

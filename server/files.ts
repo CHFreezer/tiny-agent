@@ -5,11 +5,12 @@ import { diff as nodeDiff } from 'node:util'
 import iconv from 'iconv-lite'
 import { WORKSPACE_DIR, resolveCwd } from './config.ts'
 import { fsErrorText } from './fsError.ts'
+import { cutText } from './text.ts'
 import type { DiffBlock, DiffLine, EditDiff, ToolResult } from './types.ts'
 
-// ===== 文件工具：read（文本/十六进制）与 edit（单区间严格编辑） =====
-// read：encoding 默认 utf-8（按行号输出），encoding:"hex" 输出 HxD 风格十六进制。
-// edit：一次只改一个区间。文本用 line + old/new 字符串；encoding:"hex" 时 offset=字节偏移 + old/new 十六进制字节。
+// ===== 文件工具：read / edit / write =====
+// read：encoding 未指定时按 BOM 自动识别，否则 utf-8（按行号输出），encoding:"hex" 输出 HxD 风格十六进制。
+// edit：old/new 文本替换（replace_all 可多处）或按 line 插入；encoding:"hex" 时 offset=字节偏移 + old/new 十六进制字节。
 // 校验：文本在原始字节中精确查找 old；hex 在 offset 处做 sha256 校验，不一致拒绝。
 const MAX_READ_LINES = 2000
 const MAX_READ_BYTES = 50 * 1024
@@ -39,13 +40,14 @@ function verifyOldBytes(raw: Buffer, offset: number, old: Buffer, label: string)
 }
 
 // ===== read =====
-// encoding：缺省 utf-8；"hex" 走十六进制；其余按文本编码交给 TextDecoder（不支持时回退 iconv）
+// encoding：未指定时按 BOM 自动识别，否则 utf-8；"hex" 走十六进制；其余按文本编码交给 TextDecoder（不支持时回退 iconv）
 export function readTool(args: { path?: unknown; encoding?: unknown; line?: unknown; offset?: unknown; limit?: unknown; bytes?: unknown; tail?: unknown; cwd?: unknown }): ToolResult {
   const raw = String(args.path ?? '').trim()
   if (!raw) return fail('读取失败: 缺少 path')
   const cwd = resolveCwd(args.cwd)
   if ('error' in cwd) return fail(`读取失败: ${cwd.error}`)
   const abs = toAbs(raw, cwd.dir)
+  const encodingGiven = args.encoding !== undefined && args.encoding !== null && String(args.encoding).trim() !== ''
   const encoding = normalizeEncoding(args.encoding)
   const hasOffset = args.offset !== undefined && args.offset !== null && args.offset !== ''
   const hasLine = args.line !== undefined && args.line !== null && args.line !== ''
@@ -65,17 +67,19 @@ export function readTool(args: { path?: unknown; encoding?: unknown; line?: unkn
     if (hasTail) {
       const tailValue = Math.floor(Number(args.tail))
       if (!Number.isInteger(tailValue) || tailValue < 1) return fail(`读取失败: tail 必须是 ≥1 的整数: ${String(args.tail)}`)
-      return readTail(abs, st.size, encoding, Math.min(tailValue, MAX_READ_LINES))
+      return readTail(abs, st.size, encoding, Math.min(tailValue, MAX_READ_LINES), !encodingGiven)
     }
     if (st.size > MAX_FILE_BYTES) return fail(`读取失败: 文件过大（${st.size} 字节，上限 ${MAX_FILE_BYTES}）: ${abs}`)
     const buf = fs.readFileSync(abs)
+    // 未指定编码时按 BOM 自动识别（与 rg/search 一致）；显式编码则尊重用户选择
+    const effective = (encodingGiven ? undefined : detectBomEncoding(buf)) ?? encoding
     // 文本编码里只有 UTF-16/32 正常含 NUL；其它编码含 NUL 基本可以判定是二进制
-    const nulAllowed = /^utf-?(16|32)/.test(encoding)
+    const nulAllowed = /^utf-?(16|32)/.test(effective)
     if (!nulAllowed && buf.subarray(0, Math.min(buf.length, 8192)).includes(0)) {
       return fail(`读取失败: 二进制文件（含 NUL）: ${abs}`)
     }
     let text: string
-    const enc = resolveEncoding(encoding, buf)
+    const enc = resolveEncoding(effective, buf)
     try {
       text = new TextDecoder(enc, { fatal: true }).decode(buf)
     } catch (err) {
@@ -84,14 +88,13 @@ export function readTool(args: { path?: unknown; encoding?: unknown; line?: unkn
         try {
           text = iconv.decode(buf, enc)
         } catch {
-          return fail(`读取失败: 不支持的编码: ${encoding}`)
+          return fail(`读取失败: 不支持的编码: ${effective}`)
         }
       } else {
-        return fail(`读取失败: 无法按 ${encoding} 解码`)
+        return fail(`读取失败: 无法按 ${effective} 解码`)
       }
     }
-    const spec = eolSpecOf(encoding, buf)
-    text = stripBomText(text, buf, spec)
+    text = stripBomText(text)
     const lines = splitTextLines(text)
     const total = lines.length
     const lineValue = Number(args.line)
@@ -128,7 +131,7 @@ export function readTool(args: { path?: unknown; encoding?: unknown; line?: unkn
 
 // 从文件末尾读取最后 N 行：只读尾部窗口（不够时翻倍扩大），不加载整个文件；不输出行号。
 // 反向窗口从任意位置开始时，第一行可能是残行，丢弃后仍保证拿到 N 行。
-function readTail(abs: string, size: number, encoding: string, tail: number): ToolResult {
+function readTail(abs: string, size: number, encoding: string, tail: number, detectBom = false): ToolResult {
   if (size === 0) return { text: `(文件为空: ${abs})`, plain: true }
   const fd = fs.openSync(abs, 'r')
   try {
@@ -136,9 +139,11 @@ function readTail(abs: string, size: number, encoding: string, tail: number): To
     const headLen = Math.min(size, 8192)
     const head = Buffer.alloc(headLen)
     fs.readSync(fd, head, 0, headLen, 0)
-    const nulAllowed = /^utf-?(16|32)/.test(encoding)
+    // 未指定编码时按 BOM 自动识别（与 rg/search 一致）；显式编码则尊重用户选择
+    const effective = (detectBom ? detectBomEncoding(head) : undefined) ?? encoding
+    const nulAllowed = /^utf-?(16|32)/.test(effective)
     if (!nulAllowed && head.includes(0)) return fail(`读取失败: 二进制文件（含 NUL）: ${abs}`)
-    const enc = resolveEncoding(encoding, head)
+    const enc = resolveEncoding(effective, head)
     const unit = eolSpecOf(enc, head).unit
 
     let window = Math.min(size, 64 * 1024)
@@ -158,7 +163,7 @@ function readTail(abs: string, size: number, encoding: string, tail: number): To
       }
       text = decodeLenient(buf.subarray(0, read), enc)
       if (start === 0) {
-        text = text.replace(/^﻿/, '')
+        text = stripBomText(text)
         break
       }
       // 窗口从行中间开始时首行是残行：需要多一行才能保证丢弃后仍有 tail 行
@@ -172,6 +177,8 @@ function readTail(abs: string, size: number, encoding: string, tail: number): To
 
     let lines = splitTextLines(text)
     if (start > 0) lines = lines.slice(1) // 丢掉残行
+    // 与文本模式一致：整个文件只有 BOM（或为空）时按空文件返回
+    if (start === 0 && lines.length === 0) return { text: `(文件为空: ${abs})`, plain: true }
     const picked = lines.slice(-tail).map(clampLine)
     // 从末尾往前收集，保证输出的是最新的行
     const kept: string[] = []
@@ -368,13 +375,12 @@ const decodeLenient = (raw: Buffer, encoding: string): string => {
     }
   }
 }
-const stripBomText = (text: string, raw: Buffer, spec: EolSpec): string =>
-  spec.bom.length && matchAt(raw, 0, spec.bom) && text.startsWith('\uFEFF') ? text.slice(1) : text
+// 文本输出/比较前去掉开头的 U+FEFF（UTF-8/16/32 BOM）；TextDecoder 通常已吞掉，这里兜底
+const stripBomText = (text: string): string => text.replace(/^\uFEFF+/, '')
 
 const buildTextDiff = (file: string, oldRaw: Buffer, newRaw: Buffer, encoding: string): EditDiff => {
-  const spec = eolSpecOf(encoding, oldRaw)
-  const oldTokens = splitLineTokens(stripBomText(decodeLenient(oldRaw, encoding), oldRaw, spec))
-  const newTokens = splitLineTokens(stripBomText(decodeLenient(newRaw, encoding), newRaw, spec))
+  const oldTokens = splitLineTokens(stripBomText(decodeLenient(oldRaw, encoding)))
+  const newTokens = splitLineTokens(stripBomText(decodeLenient(newRaw, encoding)))
 
   // 去掉公共前缀/后缀，只 diff 变化区间
   let p = 0
@@ -462,7 +468,7 @@ const formatDiffText = (diff: EditDiff): string => {
     }
   }
   const text = lines.join('\n')
-  return text.length > MAX_DIFF_CHARS ? `${text.slice(0, MAX_DIFF_CHARS)}\n... (diff truncated)` : text
+  return text.length > MAX_DIFF_CHARS ? `${cutText(text, MAX_DIFF_CHARS)}\n... (diff truncated)` : text
 }
 
 // 不同编码的换行 code unit 与 BOM：按 unit 对齐扫描，避免 UTF-16/32 在奇数字节上误判
@@ -471,6 +477,19 @@ interface EolSpec {
   cr: number[]
   lf: number[]
   bom: number[]
+}
+// 未显式指定 encoding 时按 BOM 识别 UTF-16/32（UTF-8 是默认编码，无需切换）。
+// 与 rg/search 的无编码 BOM 自动识别对齐；显式 encoding 不做覆盖。
+const detectBomEncoding = (buf: Buffer): string | undefined => {
+  if (buf.length >= 4) {
+    if (buf[0] === 0xff && buf[1] === 0xfe && buf[2] === 0x00 && buf[3] === 0x00) return 'utf-32le'
+    if (buf[0] === 0x00 && buf[1] === 0x00 && buf[2] === 0xfe && buf[3] === 0xff) return 'utf-32be'
+  }
+  if (buf.length >= 2) {
+    if (buf[0] === 0xff && buf[1] === 0xfe) return 'utf-16le'
+    if (buf[0] === 0xfe && buf[1] === 0xff) return 'utf-16be'
+  }
+  return undefined
 }
 const matchAt = (raw: Buffer, at: number, pat: number[]) => {
   if (at < 0 || at + pat.length > raw.length) return false
@@ -538,7 +557,8 @@ const scanLineStarts = (raw: Buffer, from: number, spec: EolSpec): number[] => {
 const endsWithEol = (raw: Buffer, spec: EolSpec) =>
   [spec.lf, spec.cr].some((p) => raw.length >= p.length && matchAt(raw, raw.length - p.length, p))
 
-// 文本行起始位置（BOM 跳过）
+// 文本行起始位置（BOM 跳过）：行首从 BOM 之后开始，
+// 首行插入/替换都落在原 BOM 之后，不会把文件头字节当作行内容改写
 const textLineStarts = (raw: Buffer, encoding: string) => {
   const spec = eolSpecOf(encoding, raw)
   const bomLen = bomLengthOf(raw, spec)
@@ -555,7 +575,7 @@ function editText(
   abs: string,
   file: string,
   exists: boolean,
-  args: { line?: unknown; old: unknown; new: unknown; encoding: string; replaceAll?: unknown },
+  args: { line?: unknown; old: unknown; new: unknown; encoding: string; replaceAll?: unknown; autoEncoding?: boolean },
 ): ToolResult {
   const encoding = args.encoding
   const oldText = String(args.old ?? '')
@@ -563,14 +583,17 @@ function editText(
   const replaceAll = args.replaceAll === true
   if (!exists) throw new Error(`${file}: 文件不存在`)
   const raw = readForEdit(abs, file)
-  const enc = resolveEncoding(encoding, raw)
+  // 未指定编码时按 BOM 自动识别（与 read/search 一致）；显式编码则尊重用户选择
+  const enc = (args.autoEncoding ? detectBomEncoding(raw) : undefined) ?? resolveEncoding(encoding, raw)
 
   // old 为空/省略 = 插入：不填 line 仅允许空文件；填 line 则把 new 原样插入该行行首
   if (!oldText) {
     const hasLine = args.line !== undefined && args.line !== null && args.line !== ''
     if (!hasLine) {
-      if (raw.length > 0) throw new Error(`${file}: 文件非空时插入需要 line`)
-      const next = encodeTextStrict(newText, resolveEncoding(encoding, Buffer.alloc(0)), file)
+      // 与 read 的「空文件」定义对齐：只有 BOM 的文件也算空，写入时保留原 BOM 字节
+      const bomLen = bomLengthOf(raw, eolSpecOf(enc, raw))
+      if (raw.length > bomLen) throw new Error(`${file}: 文件非空时插入需要 line`)
+      const next = Buffer.concat([raw.subarray(0, bomLen), encodeTextStrict(newText, enc, file)])
       const diff = buildTextDiff(file, raw, next, enc)
       fs.writeFileSync(abs, next)
       return { text: `Edited ${file}\n${formatDiffText(diff)}`, diff }
@@ -616,7 +639,7 @@ function editText(
   }
   if (!matches.length) {
     const where = args.line !== undefined && args.line !== null && args.line !== '' ? ` line=${String(args.line)} 之后` : '文件中'
-    throw new Error(`${file}: 找不到 old（按 ${encoding} 编码后在${where}无匹配）`)
+    throw new Error(`${file}: 找不到 old（按 ${enc} 编码后在${where}无匹配）`)
   }
 
   const parts: Buffer[] = []
@@ -667,6 +690,7 @@ function editHex(abs: string, file: string, exists: boolean, args: { offset?: un
 export function editTool(args: { path?: unknown; line?: unknown; offset?: unknown; old?: unknown; new?: unknown; encoding?: unknown; replace_all?: unknown; cwd?: unknown }): ToolResult {
   const file = String(args.path ?? '').trim()
   if (!file) return fail('编辑失败: 缺少 path')
+  const encodingGiven = args.encoding !== undefined && args.encoding !== null && String(args.encoding).trim() !== ''
   const encoding = normalizeEncoding(args.encoding)
   const cwd = resolveCwd(args.cwd)
   if ('error' in cwd) return fail(`编辑失败: ${cwd.error}`)
@@ -682,7 +706,7 @@ export function editTool(args: { path?: unknown; line?: unknown; offset?: unknow
     if (!String(old).length && !String(next).length) throw new Error('old 和 new 不能同时为空')
     if (!String(old).length && args.replace_all === true) throw new Error('replace_all 只能用于替换（old 不能为空）')
     if (encoding === 'hex') return editHex(abs, file, exists, { offset: args.offset, old, new: next, replaceAll: args.replace_all })
-    return editText(abs, file, exists, { line: args.line, old, new: next, encoding, replaceAll: args.replace_all })
+    return editText(abs, file, exists, { line: args.line, old, new: next, encoding, replaceAll: args.replace_all, autoEncoding: !encodingGiven })
   } catch (err) {
     return fail(`编辑失败: ${fsErrorText(err, file)}`)
   }
@@ -709,7 +733,7 @@ export function writeTool(args: { path?: unknown; content?: unknown; encoding?: 
       return { text: `${exists ? 'Overwrote' : 'Created'} ${file}` }
     }
     const content = String(args.content ?? '')
-    // 新建文件不自动写 BOM；覆盖时沿用原文件内容做编码/BOM 判定（需要 BOM 请用 hex 显式写入）
+    // 新建文件不自动写 BOM；覆盖时按 encoding 重写，不自动保留原 BOM
     const raw = exists ? fs.readFileSync(abs) : Buffer.alloc(0)
     const next = encodeTextStrict(content, resolveEncoding(encoding, raw), file)
     const diff = buildTextDiff(file, raw, next, encoding)

@@ -6,6 +6,7 @@ import { execFile, execSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { DATA_DIR, errMsg } from './config.ts'
+import { cutText } from './text.ts'
 
 // ===== TTS（pwsh 7 + System.Speech 10，本地 Xiaoxiao 音色，合成 wav 返回浏览器播放） =====
 const PWSH7 = (() => {
@@ -35,7 +36,7 @@ export function registerTts(app: express.Express): void {
     const { text } = req.body as { text?: string }
     if (typeof text !== 'string' || !text.trim()) return res.status(400).json({ error: 'text required' })
     if (!PWSH7) return res.status(500).json({ error: '未找到 pwsh 7（TTS 需要）' })
-    const body = text.slice(0, 8000)
+    const body = cutText(text, 8000)
     if (ttsCacheText === body && fs.existsSync(TTS_WAV)) {
       streamWav(res, TTS_WAV)
       return

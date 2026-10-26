@@ -154,12 +154,10 @@ const prettyArgs = (args: string) => {
 // 一个条目（一个 JSON 对象）的内容
 export function EntryContent({
   entry,
-  executing,
   generating,
   selectMode = false,
 }: {
   entry: Entry
-  executing?: boolean
   generating?: boolean
   selectMode?: boolean
 }) {
@@ -249,7 +247,6 @@ export function EntryContent({
             />
           )
         })}
-        {executing && <div className="mt-1.5 rounded-md bg-muted px-2.5 py-1.5 font-mono text-xs">⏳ 执行中…</div>}
       </>
     )
   }

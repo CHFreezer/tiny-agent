@@ -27,7 +27,6 @@ function relTime(ts: number): string {
 export function MessageRow({
   entry,
   generating,
-  executing,
   busy,
   onEdit,
   onDelete,
@@ -42,7 +41,6 @@ export function MessageRow({
 }: {
   entry: Entry
   generating?: boolean
-  executing?: boolean
   busy: boolean
   onEdit: (patch: Partial<Entry>) => void
   onDelete: () => void
@@ -123,7 +121,7 @@ export function MessageRow({
             onCancel={() => setEditing(false)}
           />
         ) : (
-          <EntryContent entry={entry} executing={executing} generating={generating} selectMode={selectMode} />
+          <EntryContent entry={entry} generating={generating} selectMode={selectMode} />
         )}
         {generating && (
           // 生成索引指示：常驻气泡内，相对气泡居中

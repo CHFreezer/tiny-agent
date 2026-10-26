@@ -3,6 +3,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { DATA_DIR } from './config.ts'
 import { removeImages, sweepImages } from './images.ts'
+import { cutText } from './text.ts'
 import type { Entry, Session } from './types.ts'
 
 // ===== 会话存储：内存为权威 + 写穿到磁盘（每会话一个文件，_index.json 存 currentId） =====
@@ -115,7 +116,7 @@ export function switchSession(id: number): boolean {
 export function renameSession(id: number, title: string): Session | null {
   const s = sessions.get(id)
   if (!s) return null
-  s.title = title.trim().slice(0, 40)
+  s.title = cutText(title.trim(), 40)
   saveSession(s)
   return s
 }

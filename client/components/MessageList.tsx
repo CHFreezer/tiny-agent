@@ -11,7 +11,6 @@ export function MessageList({
   history,
   busy,
   genId,
-  executingId,
   resetKey,
   onEdit,
   onDelete,
@@ -24,7 +23,6 @@ export function MessageList({
   history: Entry[]
   busy: boolean
   genId: string | null
-  executingId: string | null
   resetKey: number
   onEdit: (id: string, patch: Partial<Entry>) => void
   onDelete: (id: string) => void
@@ -120,7 +118,6 @@ export function MessageList({
                 entry={entry}
                 busy={busy}
                 generating={genId === entry.id}
-                executing={executingId === entry.id}
                 onEdit={(patch) => onEdit(entry.id, patch)}
                 onDelete={() => onDelete(entry.id)}
                 onRetry={() => onRetry(entry.id)}

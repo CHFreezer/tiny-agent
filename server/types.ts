@@ -49,6 +49,8 @@ export interface SearchFile {
   matches: SearchLine[] // 内容命中（按行）
 }
 export interface SearchResult {
+  mode?: 'content' | 'files' // 旧数据缺省按 content
+  syntax?: 'literal' | 'regex' // content 模式的匹配语法
   pattern: string
   root: string // 搜索根路径（显示用）
   files: SearchFile[]
@@ -92,6 +94,7 @@ export interface Settings {
 export interface ToolResult {
   text: string
   images?: string[] // data URL：工具结果随上下文注入（read_image / MCP image content），服务端落盘后条目录 URL
+  trustedPng?: boolean // 图片是可信 PNG（Playwright 截图），落盘时跳过 sharp 重编码
   diff?: EditDiff // 结构化编辑 diff（仅前端展示）
   search?: SearchResult // search 工具的结构化结果（仅前端展示）
   plain?: boolean // 前端按纯文本展示（read 的 tail 输出没有行号）

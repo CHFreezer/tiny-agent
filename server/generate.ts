@@ -68,11 +68,12 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
       const completionBefore = usage.completion
       // 响应头到达前就开始计时：本地模型 prefill 可能很久，但必须有上界
       guard.arm()
+      const req = await buildChatRequest({
+        history: session.history.slice(0, pos),
+        createdAt: session.createdAt,
+      })
       const stream = await getOpenAI(s.baseUrl, s.apiKey).chat.completions.create(
-        buildChatRequest({
-          history: session.history.slice(0, pos),
-          createdAt: session.createdAt,
-        }),
+        req,
         upstreamRequest(guard.signal),
       )
       guard.arm()
@@ -164,7 +165,7 @@ export async function generate(session: Session, w: (o: unknown) => void, finish
           w({ x: te.id, o: text })
         })
         out = r.text
-        if (r.images?.length) te.images = r.images.map((src) => storeImage(session.id, src))
+        if (r.images?.length) te.images = await Promise.all(r.images.map((src) => storeImage(session.id, src, { trustPng: r.trustedPng })))
         if (r.diff) te.diff = r.diff
         if (r.search) te.search = r.search
         if (r.plain) te.plain = true

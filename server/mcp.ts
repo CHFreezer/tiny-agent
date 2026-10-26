@@ -6,6 +6,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import type { Tool as McpTool } from '@modelcontextprotocol/sdk/types.js'
 import { WORKSPACE_DIR, errMsg, readSettings } from './config.ts'
+import { cutText } from './text.ts'
 import type { McpServerConfig } from './types.ts'
 
 // ===== MCP（官方 SDK，stdio 传输）：服务器持有连接，工具并入生成循环 =====
@@ -122,7 +123,7 @@ export function mcpStatus(): Array<{ name: string; command: string; status: stri
     name: e.cfg.name,
     command: e.cfg.command,
     status: e.status,
-    ...(e.error ? { error: e.error.slice(0, 300) } : {}),
+    ...(e.error ? { error: cutText(e.error, 300) } : {}),
     tools: e.tools.map((t) => t.name),
   }))
 }

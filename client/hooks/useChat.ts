@@ -55,13 +55,12 @@ interface SyncEvent {
   history?: Entry[] // 条目被其他设备删除
 }
 
-// 单会话的视图态（生成索引气泡 / 工具执行中 / 压缩中）——按会话存，不再是一个全局值
+// 单会话的视图态（生成索引气泡 / 压缩中）——按会话存，不再是一个全局值
 interface ViewState {
   genId: string | null
-  executingId: string | null
   compacting: boolean
 }
-const EMPTY_VIEW: ViewState = { genId: null, executingId: null, compacting: false }
+const EMPTY_VIEW: ViewState = { genId: null, compacting: false }
 
 interface ChatNotice {
   title: string
@@ -74,13 +73,13 @@ export function useChat(effort: string, onError: (message: string) => void, onNo
   const [currentSessionId, setCurrentSessionId] = useState<number | null>(null)
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS)
   const [status, setStatus] = useState('')
-  // 每个会话各自的「视图态」：生成索引气泡 / 工具执行中 / 压缩中。
+  // 每个会话各自的「视图态」：生成索引气泡 / 压缩中。
   // 按会话隔离后，切走再切回、或同时跑多个会话，都不会互相串味。
   const [viewStates, setViewStates] = useState<Map<number, ViewState>>(new Map())
   const patchView = useCallback((sid: number, patch: Partial<ViewState>) => {
     setViewStates((m) => {
       const next = { ...(m.get(sid) ?? EMPTY_VIEW), ...patch }
-      const empty = !next.genId && !next.executingId && !next.compacting
+      const empty = !next.genId && !next.compacting
       if (empty) {
         if (!m.has(sid)) return m
         const c = new Map(m)
@@ -209,7 +208,6 @@ export function useChat(effort: string, onError: (message: string) => void, onNo
               a.think += m.r
             }
             if (m.t) {
-              patchView(sessionId, { executingId: m.id })
               const slot = a.tcs[m.t.i] ?? (a.tcs[m.t.i] = { id: '', name: '', arguments: '' })
               if (m.t.id) slot.id = m.t.id
               if (m.t.n) slot.name += m.t.n
@@ -238,7 +236,7 @@ export function useChat(effort: string, onError: (message: string) => void, onNo
             const xid = m.x
             if (m.r !== undefined) {
               // 定稿：规范化文本整体替换实时输出
-              patchView(sessionId, { executingId: null, genId: xid })
+              patchView(sessionId, { genId: xid })
               patchEntry(sessionId, xid, { content: m.r, live: false, ...(m.imgs ? { images: m.imgs } : {}), ...(m.diff ? { diff: m.diff } : {}), ...(m.search ? { search: m.search } : {}), ...(m.plain ? { plain: true } : {}), ...(m.err ? { error: true } : {}) })
             } else if (m.o !== undefined) {
               // 实时输出增量：追加到工具结果条目（服务端结束时用 r 覆盖）
@@ -246,7 +244,7 @@ export function useChat(effort: string, onError: (message: string) => void, onNo
               setHistoryFn(sessionId, (h) => h.map((e) => (e.id === xid ? { ...e, content: (e.content ?? '') + chunk, live: true } : e)))
             } else {
               // 工具执行占位：生成索引移到工具结果条目
-              patchView(sessionId, { executingId: null, genId: xid })
+              patchView(sessionId, { genId: xid })
               const tc = m.tc ?? ''
               setHistoryFn(sessionId, (h) => {
                 if (h.some((e) => e.id === xid)) return h
@@ -265,7 +263,7 @@ export function useChat(effort: string, onError: (message: string) => void, onNo
             if (m.lastCompletionTokens !== undefined) setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, lastCompletionTokens: m.lastCompletionTokens } : s)))
             setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, generating: false } : s)))
             if (m.title) setSessions((x) => x.map((s) => (s.id === sessionId ? { ...s, title: m.title! } : s)))
-            patchView(sessionId, { genId: null, executingId: null, compacting: false })
+            patchView(sessionId, { genId: null, compacting: false })
             if (errMsg) onErrorRef.current(errMsg.slice(0, 200))
             return
           } else if (m.lastPromptTokens !== undefined || m.lastCompletionTokens !== undefined) {
@@ -364,7 +362,7 @@ export function useChat(effort: string, onError: (message: string) => void, onNo
         }
         // 结束：清掉该会话的视图态；没在看它 → 弹通知
         // （自己发起的生成，失败已经由发起时的通知报过，这里不重复弹）
-        patchView(m.sid, { genId: null, executingId: null, compacting: false })
+        patchView(m.sid, { genId: null, compacting: false })
         const own = ownGenSids.current.delete(m.sid)
         const name = `会话「${m.title ?? m.sid}」`
         if (m.err) {
@@ -438,7 +436,7 @@ export function useChat(effort: string, onError: (message: string) => void, onNo
         }
       } finally {
         if (genStreams.current.get(sessionId) === controller) genStreams.current.delete(sessionId)
-        patchView(sessionId, { genId: null, executingId: null })
+        patchView(sessionId, { genId: null })
       }
     },
     [attachToSession, consumeStream, patchView, setHistoryFn],
@@ -587,7 +585,7 @@ export function useChat(effort: string, onError: (message: string) => void, onNo
       }
       attachStreams.current.get(target)?.abort()
       attachStreams.current.delete(target)
-      patchView(target, { genId: null, executingId: null, compacting: false })
+      patchView(target, { genId: null, compacting: false })
       fetch(`/api/sessions/${target}`, { method: 'DELETE' })
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
         .then(({ sessions: all, currentId: cid }: { sessions: Session[]; currentId: number | null }) => {
@@ -643,7 +641,7 @@ export function useChat(effort: string, onError: (message: string) => void, onNo
     }
   }, [])
 
-  // 视图态：只暴露"当前会话"那一份（App/MessageList 的 props 形状不变）
+  // 视图态：只暴露"当前会话"那一份
   const view = viewStates.get(currentSessionId ?? -1) ?? EMPTY_VIEW
 
   return {
@@ -665,7 +663,6 @@ export function useChat(effort: string, onError: (message: string) => void, onNo
     editEntry,
     deleteEntry,
     deleteEntries,
-    executingId: view.executingId,
     retryEntry,
     compactContext,
     refreshUsage,
