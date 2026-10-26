@@ -1,7 +1,7 @@
 import OpenAI from 'openai'
 import { readMemories } from './memories.ts'
 import { currentTools } from './tools.ts'
-import { imageInfo, toDataUrl } from './images.ts'
+import { imageInfo } from './images.ts'
 import { readSettings, WORKSPACE_DIR } from './config.ts'
 import type { Entry } from './types.ts'
 
@@ -29,8 +29,20 @@ export const upstreamRequest = (signal?: AbortSignal) => {
 
 // 消息规范化：OpenAI 客户端在 content 为 null 且带 tool_calls 时按空串序列化，
 // 部分后端（vLLM/llama.cpp 等）不接受 assistant 空内容 → 补 ""
-export const normalizeMessage = (m: unknown): Record<string, unknown> => {
-  const o = { ...(m as Record<string, unknown>) }
+// 同时把 lone surrogate 换成 U+FFFD：工具输出截断若劈开 emoji，JSON 里会出现非法 \uD800 转义，上游直接 400
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g
+const wellFormed = (v: unknown): unknown => {
+  if (typeof v === 'string') return v.replace(LONE_SURROGATE, '�')
+  if (Array.isArray(v)) return v.map(wellFormed)
+  if (v && typeof v === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) out[k] = wellFormed(val)
+    return out
+  }
+  return v
+}
+export const normalizeMessage = (m: unknown) => {
+  const o = wellFormed({ ...(m as Record<string, unknown>) }) as Record<string, unknown>
   if (o.role === 'assistant' && o.tool_calls && o.content == null) o.content = ''
   return o
 }
@@ -62,8 +74,8 @@ function sanitizeToolCalls(msgs: Record<string, unknown>[]): Record<string, unkn
   return out
 }
 
-export function toApiMessages(history: Entry[]) {
-  const mapEntry = (m: Entry): Record<string, unknown>[] => {
+export async function toApiMessages(history: Entry[]) {
+  const mapEntry = async (m: Entry): Promise<Record<string, unknown>[]> => {
     // summary 只是客户端展示用的条目：唯一被选作分割点的摘要在下方以 assistant 注入，
     // 其余（失败的、或位于分割点之后的）一律不发给上游——role: "summary" 不是合法 OpenAI role
     if (m.role === 'summary') return []
@@ -95,8 +107,16 @@ export function toApiMessages(history: Entry[]) {
     if (m.role === 'user' && m.images?.length) {
       const content: Array<Record<string, unknown>> = []
       if (m.content) content.push({ type: 'text', text: m.content })
-      for (const url of m.images) content.push({ type: 'image_url', image_url: { url: toDataUrl(url) } })
-      return [{ role: 'user', content }]
+      for (const url of m.images) {
+        const info = await imageInfo(url)
+        // 空数据/损坏/无法解码的图片直接跳过，并告诉模型原因，避免整个上游请求失败
+        if (!info.mime.startsWith('image/') || info.bytes === 0) {
+          content.push({ type: 'text', text: '[图片已省略：文件损坏或无法解码]' })
+          continue
+        }
+        content.push({ type: 'image_url', image_url: { url: info.url } })
+      }
+      return [{ role: 'user', content: content.length ? content : (m.content ?? '') }]
     }
     return [{ role: m.role, content: m.content }]
   }
@@ -104,12 +124,12 @@ export function toApiMessages(history: Entry[]) {
   // 工具结果图片：OpenAI Chat Completions 的 tool 消息只支持文本，图片必须以 user 消息注入。
   // 同一条 assistant 的连续 tool 结果必须保持相邻，所以图片先收集，整轮结束后再合并成一条 user，
   // 避免插在 tool 消息之间导致 sanitizeToolCalls 误判"缺少工具结果"并丢弃整条 tool_calls。
-  const imageLabel = (entry: Entry, info: ReturnType<typeof imageInfo>) => {
+  const imageLabel = (entry: Entry, info: Awaited<ReturnType<typeof imageInfo>>) => {
     const size = info.width && info.height ? `${info.width}×${info.height}` : '尺寸未知'
     const bytes = info.bytes > 0 ? `，${info.bytes} 字节` : ''
     return `[工具结果图片] tool_call_id=${entry.tool_call_id ?? '?'}；${info.mime}；${size}${bytes}`
   }
-  const mapEntries = (entries: Entry[]): Record<string, unknown>[] => {
+  const mapEntries = async (entries: Entry[]): Promise<Record<string, unknown>[]> => {
     const out: Record<string, unknown>[] = []
     let pending: Record<string, unknown>[] = []
     const flush = () => {
@@ -119,16 +139,21 @@ export function toApiMessages(history: Entry[]) {
     }
     for (const entry of entries) {
       if (entry.role === 'tool') {
-        out.push(...mapEntry(entry))
+        out.push(...await mapEntry(entry))
         for (const src of entry.images ?? []) {
-          const info = imageInfo(src)
+          const info = await imageInfo(src)
+          // 空数据/损坏/无法解码的图片直接跳过，并告诉模型原因，避免整个上游请求失败
+          if (!info.mime.startsWith('image/') || info.bytes === 0) {
+            pending.push({ type: 'text', text: `[工具结果图片未注入：文件损坏或无法解码] tool_call_id=${entry.tool_call_id ?? '?'}` })
+            continue
+          }
           pending.push({ type: 'text', text: imageLabel(entry, info) })
           pending.push({ type: 'image_url', image_url: { url: info.url } })
         }
         continue
       }
       flush()
-      out.push(...mapEntry(entry))
+      out.push(...await mapEntry(entry))
     }
     flush()
     return out
@@ -142,7 +167,7 @@ export function toApiMessages(history: Entry[]) {
     }
   }
   if (sumIdx < 0) {
-    return sanitizeToolCalls(mapEntries(history.filter((m) => !(m.role === 'system' && !m.content?.trim()))))
+    return sanitizeToolCalls(await mapEntries(history.filter((m) => !(m.role === 'system' && !m.content?.trim()))))
   }
   const msgs: Record<string, unknown>[] = []
   for (const m of history.slice(0, sumIdx)) {
@@ -150,7 +175,7 @@ export function toApiMessages(history: Entry[]) {
   }
   msgs.push({ role: 'user', content: 'What did we do so far?' })
   msgs.push({ role: 'assistant', content: history[sumIdx].content ?? '' })
-  msgs.push(...mapEntries(history.slice(sumIdx + 1)))
+  msgs.push(...await mapEntries(history.slice(sumIdx + 1)))
   msgs.push({ role: 'user', content: '从这里继续调用工具或者给出答案' })
   return sanitizeToolCalls(msgs)
 }
@@ -179,11 +204,11 @@ const devContent = (createdAt: number): string => {
 // 除 history（调用方切片/过滤）与 extra（压缩请求的摘要指令）外，所有字段
 // （model/tools/max_tokens/reasoning_effort/developer 注入）都从 settings 读取，
 // 调用方无法传入任何会改变请求的字段——从结构上杜绝两请求分叉导致前缀 cache miss。
-export function buildChatRequest(opts: {
+export async function buildChatRequest(opts: {
   history: Entry[]
   extra?: Record<string, unknown>[]
   createdAt: number
-}): {
+}): Promise<{
   model: string
   messages: OpenAI.Chat.ChatCompletionMessageParam[]
   stream: true
@@ -194,10 +219,10 @@ export function buildChatRequest(opts: {
   reasoning?: { effort: string }
   thinking?: { type: string }
   chat_template_kwargs?: { enable_thinking?: boolean; reasoning_effort?: string }
-} {
+}> {
   const s = readSettings()
   const allTools = currentTools()
-  let messages = toApiMessages(opts.history)
+  let messages = await toApiMessages(opts.history)
   const devMsg = { role: 'developer', content: devContent(opts.createdAt) }
   const sysIdx = messages.findIndex((m) => m.role === 'system')
   messages.splice(sysIdx >= 0 ? sysIdx + 1 : 0, 0, devMsg)

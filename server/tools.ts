@@ -8,9 +8,10 @@ import { WORKSPACE_DIR, errMsg, readSettings, resolveCwd } from './config.ts'
 import { MCP_TOOL_TIMEOUT, mcpToolMap, mcpTools } from './mcp.ts'
 import { editTool, readTool, writeTool } from './files.ts'
 import { searchTool } from './search.ts'
-import { clipMiddle } from './text.ts'
+import { clipMiddle, cutText } from './text.ts'
 import { EDIT_ARGS, PWSH_ARGS, READ_ARGS, READ_IMAGE_ARGS, SEARCH_ARGS, WRITE_ARGS, validateArgs, validateMcpArgs } from './toolArgs.ts'
 import { fsErrorText } from './fsError.ts'
+import { normalizeImage, sniffImageMime } from './images.ts'
 import type { ToolCall, ToolResult } from './types.ts'
 
 // 内置工具（OpenAI function calling 格式）
@@ -18,7 +19,7 @@ const READ_TOOL: OpenAI.Chat.ChatCompletionTool = {
   type: 'function',
   function: {
     name: 'read',
-    description: `读取文件。encoding 默认 "utf-8"；encoding:"hex" 为十六进制模式（地址 + 16 字节/行 + ASCII）。
+    description: `读取文件。encoding 未指定时按 BOM 自动识别 UTF-16/32，否则 utf-8；encoding:"hex" 为十六进制模式（地址 + 16 字节/行 + ASCII）。
 - 文本：line = 起始行（1-based，默认 1），limit = 行数（默认/上限 2000）；输出 cat -n 风格（行号右对齐 + Tab）
 - 文本末尾：tail = 最后 N 行（1-2000，不输出行号；与 line/limit 互斥）
 - hex：offset = 字节偏移（0-based，支持 0x，默认 0），bytes = 字节数（默认 1024，上限 4096）
@@ -27,7 +28,7 @@ const READ_TOOL: OpenAI.Chat.ChatCompletionTool = {
       type: 'object',
       properties: {
         path: { type: 'string', description: '文件路径' },
-        encoding: { type: 'string', description: '文本编码（默认 utf-8）或 "hex"' },
+        encoding: { type: 'string', description: '文本编码（默认自动/UTF-8）或 "hex"' },
         line: { type: 'number', description: '文本：起始行（1-based，默认 1）' },
         offset: { type: ['number', 'string'], description: 'hex：字节偏移（0-based，支持 0x，默认 0）' },
         limit: { type: 'number', description: '文本：行数（默认/上限 2000）' },
@@ -53,7 +54,7 @@ hex：offset 必填，old/new 为十六进制字节；old 空=插入，new 空=�
         path: { type: 'string', description: '文件路径' },
         old: { type: 'string', description: '原文；空/省略=插入' },
         new: { type: 'string', description: '替换内容；空=删除' },
-        encoding: { type: 'string', description: '文本编码（默认 utf-8）或 "hex"' },
+        encoding: { type: 'string', description: '文本编码（默认自动/UTF-8）或 "hex"' },
         replace_all: { type: 'boolean', description: '全部匹配替换' },
         line: { type: 'number', description: '插入行号或查找起点（1-based）' },
         offset: { type: ['number', 'string'], description: 'hex：字节偏移（0-based，支持 0x）' },
@@ -88,38 +89,32 @@ const SEARCH_TOOL: OpenAI.Chat.ChatCompletionTool = {
   type: 'function',
   function: {
     name: 'search',
-    description: `在目录或单个文件中搜索文本。path 相对 cwd（默认 workspace，也支持绝对路径），可以是目录或文件；文件名命中也会作为结果返回。
-mode：literal（默认，按字面量匹配，元字符不生效）或 regex（正则表达式，支持 lookaround）。
-flags：可选组合字符串：
-- i = 忽略大小写
-- w = 全词匹配
-- max_results：最多结果数（默认 100，上限 1000），达到后立即停止
-- timeout：超时秒数（默认 30，最大 600）
-- context：命中前后各显示 N 行上下文（默认 0，上限 20；上下文不计入结果数）
-- encoding：文件编码（默认自动/UTF-8）
-- include：只搜索匹配这些 glob 的文件（任意层级用 **/ 前缀）
-- exclude：追加排除的 glob（不以 ** 或 / 开头的模式锚定搜索根；任意层级用 **/ 前缀）；默认遵循 .gitignore（即使不在 git 仓库内）`,
+    description: `搜索文件内容或文件名。content 搜内容，files 用 glob 列路径；glob 同 rg，默认遵循 .gitignore。`,
     parameters: {
       type: 'object',
       properties: {
-        pattern: { type: 'string', description: '搜索文本；默认按字面量，mode:"regex" 时按正则解释' },
-        mode: { type: 'string', enum: ['literal', 'regex'], description: '匹配模式：literal（默认）或 regex' },
-        flags: { type: 'string', description: '可选组合：i=忽略大小写，w=全词匹配' },
-        path: { type: 'string', description: '搜索路径：目录或文件（相对 cwd，默认 .）' },
-        cwd: { type: 'string', description: '工作目录覆盖（必须已存在；相对路径基于 workspace，省略=workspace）' },
-        max_results: { type: 'number', description: '最多结果数（默认 100，上限 1000）' },
-        timeout: { type: 'number', description: '超时秒数（默认 30，最大 600）' },
-        context: { type: 'number', description: '命中前后各显示 N 行上下文（默认 0，上限 20）' },
-        encoding: { type: 'string', description: '文件编码（默认自动/UTF-8）' },
+        pattern: {
+          type: 'string',
+          description: 'content：文本/正则；files：正向 glob（如 **/*.ts）',
+        },
+        mode: { type: 'string', enum: ['content', 'files'], description: 'content=搜内容（默认），files=列路径' },
+        syntax: { type: 'string', enum: ['literal', 'regex'], description: '仅 content：literal（默认）或 regex（支持 lookaround）' },
+        flags: { type: 'string', description: '仅 content：i=忽略大小写，w=全词' },
+        path: { type: 'string', description: '搜索路径（默认 .）；files 模式必须是目录' },
+        cwd: { type: 'string', description: '工作目录（默认 workspace）' },
+        max_results: { type: 'number', description: '最大结果数（默认 100，上限 1000）' },
+        timeout: { type: 'number', description: '超时秒数（默认 30，上限 600）' },
+        context: { type: 'number', description: '仅 content：前后 N 行（默认 0，上限 20）' },
+        encoding: { type: 'string', description: '仅 content：文件编码（默认自动/UTF-8）' },
         include: {
           type: 'array',
           items: { type: 'string' },
-          description: '只搜索匹配这些 glob 的文件（任意层级用 **/ 前缀）',
+          description: '仅 content：正向 glob',
         },
         exclude: {
           type: 'array',
           items: { type: 'string' },
-          description: '追加排除的 glob（不以 ** 或 / 开头的模式锚定搜索根；任意层级用 **/ 前缀）；默认遵循 .gitignore',
+          description: '负向 glob 排除',
         },
       },
       required: ['pattern'],
@@ -150,7 +145,7 @@ const READ_IMAGE_TOOL: OpenAI.Chat.ChatCompletionTool = {
     parameters: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: `图片文件路径（相对 cwd）` },
+        path: { type: 'string', description: '图片文件路径（相对 cwd，也支持绝对路径）' },
         cwd: { type: 'string', description: '工作目录覆盖（必须已存在；相对路径基于 workspace，省略=workspace）' },
       },
       required: ['path'],
@@ -159,31 +154,54 @@ const READ_IMAGE_TOOL: OpenAI.Chat.ChatCompletionTool = {
 }
 
 // 当前工具集（与生成请求同源）：生成循环与压缩请求共用。
-// 文件工具排在 pwsh 前面：模型对工具列表有位置偏好，且 pwsh 描述里已注明文件操作走内置工具。
+// 文件工具排在 pwsh 前面：模型对工具列表有位置偏好。
 export function currentTools(): OpenAI.Chat.ChatCompletionTool[] {
   return [READ_TOOL, SEARCH_TOOL, EDIT_TOOL, WRITE_TOOL, READ_IMAGE_TOOL, ...(readSettings().pwsh ? [PWSH_TOOL] : []), ...mcpTools()]
 }
 
-// MCP 工具结果 → ToolResult：文本 + image content（如 Playwright 截图）转 data URL，
-// 图片与 read_image 走同一条落盘/注入路径
-export function formatMcpResult(result: CallToolResult): ToolResult {
+// MCP 工具结果 → ToolResult：文本 + image content（如 Playwright 截图）严格解码后转 PNG/GIF data URL
+// 图片与 read_image 走同一条落盘/注入路径；无法解码的图片直接省略并告诉模型
+export async function formatMcpResult(result: CallToolResult, opts?: { trustPng?: boolean }): Promise<ToolResult> {
   const parts = Array.isArray(result.content) ? result.content : []
   const texts = parts
     .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
     .map((c) => c.text)
-  const images = parts
-    .filter((c): c is { type: 'image'; data: string; mimeType: string } => c.type === 'image')
-    .map((c) => `data:${c.mimeType || 'image/png'};base64,${c.data}`)
-  const out = texts.join('\n') || (images.length ? '(图片结果)' : '(无文本输出)')
+  const images: string[] = []
+  const notes: string[] = []
+  let trustedPng = false
+  for (const c of parts) {
+    if (c.type !== 'image') continue
+    const data = String(c.data ?? '')
+    const buf = data ? Buffer.from(data, 'base64') : Buffer.alloc(0)
+    const mime = buf.length ? sniffImageMime(buf) : undefined
+    if (!mime) {
+      notes.push('[图片已省略：无法识别或为空]')
+      continue
+    }
+    // Playwright 截图是可信 PNG：不重复解码/编码，原样落盘
+    if (opts?.trustPng && mime === 'image/png') {
+      images.push(`data:image/png;base64,${data}`)
+      trustedPng = true
+      continue
+    }
+    const img = await normalizeImage(buf)
+    if (!img) {
+      notes.push('[图片已省略：无法解码]')
+      continue
+    }
+    images.push(`data:${img.mime};base64,${img.data.toString('base64')}`)
+  }
+  const out = [...texts, ...notes].join('\n') || (images.length ? '(图片结果)' : '(无文本输出)')
   return {
     text: (result.isError ? '(MCP 返回错误)\n' : '') + clipMiddle(out, MCP_MAX_OUTPUT_CHARS),
     isError: result.isError === true,
     ...(images.length ? { images } : {}),
+    ...(trustedPng ? { trustedPng: true } : {}),
   }
 }
 
 // ===== 工具执行（服务器侧） =====
-// 只支持 PowerShell 7（pwsh.exe）：脚本正文作为单个 argv 元素交给 -Command，不做任何注入（照 opencode shell.ts:293）
+// 只支持 PowerShell 7：脚本作为单个 -Command argv 直接传入，不做 shell 拼接（同 OpenCode 的调用方式）
 const PWSH_DEFAULT_TIMEOUT_S = 30
 const PWSH_MAX_TIMEOUT_S = 600
 const PWSH_MAX_CAPTURE_BYTES = 1024 * 1024 // 捕获窗口（滚动）：只留最新这么多字节，超出丢最旧的，不杀进程
@@ -236,7 +254,7 @@ function makeLiveEmitter(send: (text: string) => void) {
       if (capped || !text) return
       const room = PWSH_LIVE_MAX_CHARS - sent - buf.length
       if (text.length > room) {
-        buf += text.slice(0, Math.max(0, room)) + '\n[实时输出已达上限，已停止实时显示]\n'
+        buf += cutText(text, Math.max(0, room)) + '\n[实时输出已达上限，已停止实时显示]\n'
         capped = true
         flush()
         return
@@ -257,17 +275,14 @@ interface PwshRun {
   durationMs: number
   timedOut: boolean
 }
-// PowerShell 启动前置（Codex / Claude Code 同思路）：输出锁到 UTF-8（无 BOM）；
-// 脚本通过 stdin 以原始字节传入（显式 UTF-8 解码），避开 Windows 命令行 ~32K 上限和引号转义问题。
-// 不用 [Console]::InputEncoding：它会改动共享控制台的输入代码页，影响父进程。
-const PWSH_BOOTSTRAP = [
-  'try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}',
-  'try {',
-  '  $ms = [System.IO.MemoryStream]::new()',
-  '  [Console]::OpenStandardInput().CopyTo($ms)',
-  '  Invoke-Expression ([System.Text.Encoding]::UTF8.GetString($ms.ToArray()))',
-  '} catch { Write-Error $_; exit 1 }',
-].join('\n')
+// 直接 -Command 传脚本：不经过 stdin/IEX，ConstrainedLanguage 下也能执行；
+// 末尾不写 exit，PathInfo 等对象会正常走默认 formatter（不需要 Out-String）。
+// FullLanguage 用 $host.SetShouldExit 保留精确退出码；ConstrainedLanguage 不支持它，条件跳过，输出仍完整（退出码退化为 0/1）。
+// 命令走 Windows 命令行，约 32K 上限；30K 保守拦截，长脚本请写成 .ps1 后执行。
+const PWSH_UTF8 = 'try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}'
+const PWSH_EXIT = "if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') { $host.SetShouldExit($LASTEXITCODE) }"
+const PWSH_MAX_SCRIPT_CHARS = 30000
+const buildPwshScript = (command: string) => `${PWSH_UTF8}\n$LASTEXITCODE = 0\n${command}\n${PWSH_EXIT}`
 
 // pwsh 可执行文件：优先固定安装位置（与 Claude Code 一致），找不到再交给 PATH。
 // PowerShell 7 安装后不一定在当前 PATH 里（尤其是从 IDE/服务启动的进程）。
@@ -283,24 +298,17 @@ function resolvePwsh(): string {
   return pwshBin
 }
 
-function runPwsh(command: string, timeoutSeconds: number, signal: AbortSignal, cwd: string, onOutput?: (text: string) => void) {
+function runPwsh(script: string, timeoutSeconds: number, signal: AbortSignal, cwd: string, onOutput?: (text: string) => void) {
   const { promise, resolve, reject } = Promise.withResolvers<PwshRun>()
-  const args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', PWSH_BOOTSTRAP]
+  const args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script]
   const startedAt = Date.now()
   const child = spawn(resolvePwsh(), args, {
     shell: false,
     windowsHide: true,
     cwd,
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, NO_COLOR: '1', TEMP: path.join(WORKSPACE_DIR, 'tmp'), TMP: path.join(WORKSPACE_DIR, 'tmp'), TMPDIR: path.join(WORKSPACE_DIR, 'tmp') },
   })
-  // 子进程提前退出时写 stdin 会 EPIPE：吞掉，结果由 exit/close 收尾
-  child.stdin.on('error', () => {})
-  try {
-    child.stdin.end(command, 'utf8')
-  } catch {
-    // 已退出
-  }
   const stdoutSink = { chunks: [] as Buffer[], bytes: 0, dropped: 0 }
   const stderrSink = { chunks: [] as Buffer[], bytes: 0, dropped: 0 }
   const keepLatest = (sink: { chunks: Buffer[]; bytes: number; dropped: number }, chunk: Buffer) => {
@@ -317,6 +325,20 @@ function runPwsh(command: string, timeoutSeconds: number, signal: AbortSignal, c
         sink.chunks[0] = head.subarray(excess)
         sink.bytes -= excess
         sink.dropped += excess
+      }
+    }
+    // 实际截断过头部时，若落在多字节字符中间，再丢到下一个可能的字符起点
+    if (sink.dropped > 0) {
+      while (sink.chunks.length) {
+        const head = sink.chunks[0]
+        if (!head.length) {
+          sink.chunks.shift()
+          continue
+        }
+        if (head[0] < 0x80 || head[0] > 0xbf) break
+        sink.chunks[0] = head.subarray(1)
+        sink.bytes--
+        sink.dropped++
       }
     }
   }
@@ -469,10 +491,18 @@ export async function executeTool(tc: ToolCall, signal: AbortSignal, onOutput?: 
       if (!st.isFile()) throw new Error(`不是文件: ${abs}`)
       if (st.size > 20 * 1024 * 1024) throw new Error(`图片过大（上限 20MB）: ${abs}`)
       const ext = path.extname(abs).toLowerCase()
-      const MIME_BY_EXT: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' }
-      const mime = MIME_BY_EXT[ext]
-      if (!mime) throw new Error(`不支持的图片格式（仅支持 png/jpg/webp/gif）: ${ext || '(无扩展名)'}`)
-      const dataUrl = `data:${mime};base64,${fs.readFileSync(abs).toString('base64')}`
+      const ALLOWED_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif'])
+      if (!ALLOWED_EXT.has(ext)) throw new Error(`不支持的图片格式（仅支持 png/jpg/webp/gif）: ${ext || '(无扩展名)'}`)
+      const buf = fs.readFileSync(abs)
+      if (!buf.length) throw new Error(`图片文件为空: ${abs}`)
+      const mime = sniffImageMime(buf)
+      if (!mime) throw new Error(`不是有效的图片（无法识别格式）: ${abs}`)
+      if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(mime)) {
+        throw new Error(`不支持的图片格式（仅支持 png/jpg/webp/gif）: ${abs}`)
+      }
+      const img = await normalizeImage(buf)
+      if (!img) throw new Error(`图片无法解码（文件可能已损坏）: ${abs}`)
+      const dataUrl = `data:${img.mime};base64,${img.data.toString('base64')}`
       return { text: `已读取图片 ${abs}（${st.size} 字节）`, images: [dataUrl] }
     } catch (err) {
       if (signal.aborted) throw err
@@ -487,7 +517,9 @@ export async function executeTool(tc: ToolCall, signal: AbortSignal, onOutput?: 
       const cwd = resolveCwd(args.cwd)
       if ('error' in cwd) return { text: `工具执行失败: ${cwd.error}`, isError: true }
       const timeoutSeconds = typeof args.timeout === 'number' ? Math.min(args.timeout, PWSH_MAX_TIMEOUT_S) : PWSH_DEFAULT_TIMEOUT_S
-      const r = await runPwsh(String(args.command), timeoutSeconds, signal, cwd.dir, onOutput)
+      const script = buildPwshScript(String(args.command))
+      if (script.length > PWSH_MAX_SCRIPT_CHARS) return { text: '命令过长（上限 30K）', isError: true }
+      const r = await runPwsh(script, timeoutSeconds, signal, cwd.dir, onOutput)
       return {
         text: r.text,
         stdout: r.stdout,
@@ -507,13 +539,16 @@ export async function executeTool(tc: ToolCall, signal: AbortSignal, onOutput?: 
   const m = mcpToolMap.get(tc.name)
   if (m?.entry.client) {
     try {
-      validateMcpArgs(tc.name, m.tool.inputSchema, raw)
+      // Playwright 截图统一 PNG；其余 MCP 图片在 formatMcpResult 里统一转 PNG/GIF
+      const isScreenshot = m.tool.name.endsWith('browser_take_screenshot')
+      const args = isScreenshot ? { ...raw, type: 'png' } : raw
+      validateMcpArgs(tc.name, m.tool.inputSchema, args)
       const result = (await m.entry.client.callTool(
-        { name: m.tool.name, arguments: raw },
+        { name: m.tool.name, arguments: args },
         undefined,
         { timeout: MCP_TOOL_TIMEOUT, signal },
       )) as CallToolResult
-      return formatMcpResult(result)
+      return await formatMcpResult(result, { trustPng: isScreenshot })
     } catch (err) {
       if (signal.aborted) throw err
       return { text: `MCP 工具执行失败: ${mcpErrorText(err)}`, isError: true }

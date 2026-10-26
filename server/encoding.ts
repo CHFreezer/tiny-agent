@@ -66,7 +66,24 @@ export function decodeOutput(buf: Buffer): string {
 }
 
 // 长前缀里最后一个完整的字符边界（用于没有换行的实时输出：宁可晚一点，也别把双字节字符劈开）
+const utf8IncompleteStart = (buf: Buffer): number | undefined => {
+  let i = buf.length - 1
+  let cont = 0
+  while (i >= 0 && cont < 3) {
+    const b = buf[i]
+    if (b >= 0x80 && b < 0xc0) { cont++; i--; continue }
+    break
+  }
+  if (i < 0) return undefined
+  const b = buf[i]
+  if (b < 0xc0) return undefined
+  const need = b >= 0xf0 ? 4 : b >= 0xe0 ? 3 : 2
+  return i + need > buf.length ? i : undefined
+}
+
 function safePrefixLen(buf: Buffer, enc: string): number {
+  const utf8Cut = utf8IncompleteStart(buf)
+  if (utf8Cut !== undefined) return utf8Cut
   if (isUtf8(buf)) return buf.length
   if (/^cp(932|936|949|950)$/i.test(enc)) {
     let i = 0
@@ -134,8 +151,12 @@ export function createLiveDecoder(onText: (text: string) => void, flushBytes = 8
       }
       pending = pending.subarray(start)
       if (pending.length >= flushBytes) {
-        emit(pending)
-        pending = Buffer.alloc(0)
+        const n = safePrefixLen(pending, systemEncoding())
+        if (n > 0) {
+          emit(pending.subarray(0, n))
+          pending = pending.subarray(n)
+        }
+        if (pending.length) arm()
         return
       }
       if (pending.length) arm()

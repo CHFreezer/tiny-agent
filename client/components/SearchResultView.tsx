@@ -24,8 +24,10 @@ function Highlight({ text, ranges }: { text: string; ranges: Array<[number, numb
 export function SearchResultView({ result }: { result: SearchResult }) {
   const [open, setOpen] = useState(false)
   const { files, totalMatches, nameHits, truncated, timedOut } = result
-  const totalResults = totalMatches + nameHits
-  const breakdown = nameHits ? `（${totalMatches} 处内容 + ${nameHits} 个文件名命中）` : ''
+  const isFiles = result.mode === 'files'
+  const totalResults = isFiles ? files.length : totalMatches + nameHits
+  const breakdown = !isFiles && nameHits ? `（${totalMatches} 处内容 + ${nameHits} 个文件名命中）` : ''
+  const countLabel = isFiles ? `${files.length} 个文件` : `${files.length} 个文件，${totalResults} 个结果`
   return (
     <div className="mt-1.5 min-w-0 rounded-lg border border-border bg-muted/50 px-2.5 py-1.5 text-xs text-muted-foreground">
       <button
@@ -34,14 +36,14 @@ export function SearchResultView({ result }: { result: SearchResult }) {
         className="flex w-full flex-wrap items-center gap-x-1.5 gap-y-1 text-left font-medium select-none cursor-pointer"
       >
         <ChevronRight className={cn('size-3.5 shrink-0 transition-transform', open && 'rotate-90')} />
-        <span>搜索结果</span>
+        <span>{isFiles ? '文件搜索结果' : '搜索结果'}</span>
         <code
           className="min-w-0 max-w-[55%] truncate rounded bg-muted px-1 py-0.5 font-mono text-[11px] font-normal text-foreground"
           title={result.pattern}
         >
           {result.pattern}
         </code>
-        <span className="font-normal">· {files.length} 个文件，{totalResults} 个结果</span>
+        <span className="font-normal">· {countLabel}</span>
         {truncated && (
           <span className="rounded bg-amber-500/15 px-1 text-[10px] font-normal text-amber-700 dark:text-amber-300">已截断</span>
         )}
@@ -75,7 +77,7 @@ export function SearchResultView({ result }: { result: SearchResult }) {
             {breakdown ? <span>{breakdown}</span> : null}
             {truncated && (
               <span className="text-amber-700 dark:text-amber-300">
-                · 已显示 {totalResults} 个结果{result.limit ? `（上限 ${result.limit}）` : ''}
+                · 已显示 {isFiles ? `${files.length} 个文件` : `${totalResults} 个结果`}{result.limit ? `（上限 ${result.limit}）` : ''}
               </span>
             )}
             {result.nonUtf8 && (

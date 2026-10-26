@@ -260,7 +260,6 @@ export default function App() {
             history={chat.history}
             busy={chat.busy}
             genId={chat.genId}
-            executingId={chat.executingId}
             resetKey={scrollKey}
             onEdit={chat.editEntry}
             onDelete={chat.deleteEntry}
